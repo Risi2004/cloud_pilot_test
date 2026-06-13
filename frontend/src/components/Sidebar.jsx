@@ -9,6 +9,7 @@ const Sidebar = () => {
         <NavLink to="/" className="sidebar-logo">
           CloudPilot
         </NavLink>
+        <span className="beta-badge">Beta</span>
       </div>
 
       <ul className="sidebar-menu">

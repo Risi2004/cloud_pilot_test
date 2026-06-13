@@ -7,6 +7,7 @@ const Navbar = () => {
       <a href="/" className="navbar-brand">
         <div className="navbar-logo-icon">C</div>
         <span>CloudPilot</span>
+        <span className="beta-badge">Beta</span>
       </a>
       
       <div className="navbar-actions">
