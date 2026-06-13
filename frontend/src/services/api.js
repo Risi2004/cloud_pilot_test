@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = 'http://localhost:5000/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -48,7 +48,7 @@ export const sendChatMessage = async (message, history = []) => {
 };
 
 export const getDashboardStats = async () => {
-  const response = await axios.get('http://localhost:5000/api/dashboard-stats');
+  const response = await api.get('/dashboard-stats');
   return response.data;
 };
 
