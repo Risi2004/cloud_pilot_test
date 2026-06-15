@@ -260,6 +260,11 @@ export const triggerAutoDeployment = async (req, res) => {
   const { projectName, frontendTier, backendTier, envVars, skipRender, skipVercel, renderUrl, vercelUrl } = config || {};
   const cleanProjName = (projectName || 'cloudpilot-app').toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
+  // Reset simulation count on fresh deployments
+  if (!skipRender && !skipVercel) {
+    simulationCounts[githubUrl] = 0;
+  }
+
   const logs = [];
   const status = {
     vercel: { success: false, url: null, error: null, id: null },
@@ -612,18 +617,21 @@ export const autoFixAndRedeploy = async (req, res) => {
           try {
             const pkgJson = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
             pkgJson.dependencies = pkgJson.dependencies || {};
-            if (!pkgJson.dependencies['react-router-dom']) {
-              pkgJson.dependencies['react-router-dom'] = '^6.22.0';
-              fs.writeFileSync(pkgPath, JSON.stringify(pkgJson, null, 2), 'utf8');
-              filesChanged.push('frontend/package.json');
-              
-              try {
-                await gitAdd();
-                await gitCommit('fix(deploy): add missing react-router-dom dependency');
-                await gitPush();
-              } catch (gitErr) {
-                console.warn('[Auto-Fix] Git commands skipped or failed in simulation:', gitErr.message);
-              }
+            
+            // Set/ensure dependency is configured
+            pkgJson.dependencies['react-router-dom'] = '^7.17.0';
+            // Inject timestamp metadata to force git change detection
+            pkgJson.cloudpilot_healed_at = new Date().toISOString();
+            
+            fs.writeFileSync(pkgPath, JSON.stringify(pkgJson, null, 2), 'utf8');
+            filesChanged.push('frontend/package.json');
+            
+            try {
+              await gitAdd();
+              await gitCommit('fix(deploy): add missing react-router-dom dependency');
+              await gitPush();
+            } catch (gitErr) {
+              console.warn('[Auto-Fix] Git commands skipped or failed in simulation:', gitErr.message);
             }
           } catch (pkgErr) {
             console.error('[Auto-Fix] Failed to edit package.json locally:', pkgErr);
