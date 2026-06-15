@@ -1,6 +1,7 @@
 import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 import Analysis from '../models/Analysis.js';
 import { aiDeploymentPlan, aiFixCode } from '../services/ollamaService.js';
 import { gitAdd, gitCommit, gitPush } from '../services/gitService.js';
@@ -54,6 +55,38 @@ const isLocalProject = (githubUrl) => {
   }
 
   return false;
+};
+
+/**
+ * Safely resolves the directory path for the targeted Git repository.
+ * If it matches the local project, returns the parent directory of backend.
+ * Otherwise, clones the remote repository to a temp directory and returns that path.
+ */
+const getRepositoryPath = async (githubUrl) => {
+  if (isLocalProject(githubUrl)) {
+    return path.dirname(process.cwd());
+  }
+
+  const tempDir = path.join(process.cwd(), 'temp-clones');
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
+  }
+
+  // Extract repo name safely
+  const repoName = githubUrl.split('/').pop().replace(/\.git$/, '');
+  const clonePath = path.join(tempDir, repoName);
+
+  if (!fs.existsSync(clonePath)) {
+    console.log(`[Auto-Fix] Cloned repository path not found. Cloning remote repository "${githubUrl}" to "${clonePath}"...`);
+    try {
+      execSync(`git clone "${githubUrl}" "${clonePath}"`, { stdio: 'ignore' });
+    } catch (cloneErr) {
+      console.error(`[Auto-Fix] Failed to clone remote repository:`, cloneErr);
+      throw new Error(`Failed to clone target repository ${githubUrl} locally for auto-healing: ${cloneErr.message}`);
+    }
+  }
+
+  return clonePath;
 };
 
 /**
@@ -257,7 +290,7 @@ export const triggerAutoDeployment = async (req, res) => {
     return res.status(400).json({ error: 'githubUrl is required' });
   }
   
-  const { projectName, frontendTier, backendTier, envVars, skipRender, skipVercel, renderUrl, vercelUrl } = config || {};
+  let { projectName, frontendTier, backendTier, envVars, skipRender, skipVercel, renderUrl, vercelUrl } = config || {};
   const cleanProjName = (projectName || 'cloudpilot-app').toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
   // Reset simulation count on fresh deployments
@@ -272,6 +305,18 @@ export const triggerAutoDeployment = async (req, res) => {
   };
 
   try {
+    const analyses = await Analysis.find({ githubUrl }).sort({ createdAt: -1 }).limit(1);
+    const analysis = analyses[0];
+    const hasBackend = analysis?.recommendation?.backend && analysis.recommendation.backend !== 'None';
+    const hasFrontend = analysis?.recommendation?.frontend && analysis.recommendation.frontend !== 'None';
+
+    if (!hasBackend) {
+      skipRender = true;
+    }
+    if (!hasFrontend) {
+      skipVercel = true;
+    }
+
     logs.push('[Agent] Starting automated provisioning workflow...');
 
     // Automatically sync environment variable changes back to local codebase files (.env) ONLY if it is the local project
@@ -292,7 +337,11 @@ export const triggerAutoDeployment = async (req, res) => {
 
     // Render Web Service Provisioning
     if (skipRender) {
-      logs.push('[Agent] Render web service provisioning skipped (already successful or skipped by user).');
+      if (!hasBackend) {
+        logs.push('[Agent] Render web service provisioning bypassed (frontend-only project, no backend component detected).');
+      } else {
+        logs.push('[Agent] Render web service provisioning skipped (already successful or skipped by user).');
+      }
       status.render.success = true;
       status.render.url = renderUrl || null;
     } else if (isMockRender) {
@@ -379,7 +428,11 @@ export const triggerAutoDeployment = async (req, res) => {
 
     // Vercel Frontend Project Provisioning
     if (skipVercel) {
-      logs.push('[Agent] Vercel frontend project provisioning skipped (already successful or skipped by user).');
+      if (!hasFrontend) {
+        logs.push('[Agent] Vercel frontend project provisioning bypassed (backend-only project, no frontend component detected).');
+      } else {
+        logs.push('[Agent] Vercel frontend project provisioning skipped (already successful or skipped by user).');
+      }
       status.vercel.success = true;
       status.vercel.url = vercelUrl || null;
     } else if (isMockVercel) {
@@ -611,7 +664,8 @@ export const autoFixAndRedeploy = async (req, res) => {
       explanation = "Vercel build failed because the 'react-router-dom' dependency is missing in package.json, which prevents Vite compilation.";
       solution = "Add 'react-router-dom' to frontend package.json and commit changes.";
       
-      const pkgPath = path.join(path.dirname(process.cwd()), 'frontend', 'package.json');
+      const workspaceRoot = await getRepositoryPath(githubUrl);
+      const pkgPath = path.join(workspaceRoot, 'frontend', 'package.json');
       if (fs.existsSync(pkgPath)) {
         if (!dryRun) {
           try {
@@ -627,9 +681,9 @@ export const autoFixAndRedeploy = async (req, res) => {
             filesChanged.push('frontend/package.json');
             
             try {
-              await gitAdd();
-              await gitCommit('fix(deploy): add missing react-router-dom dependency');
-              await gitPush();
+              await gitAdd(workspaceRoot);
+              await gitCommit('fix(deploy): add missing react-router-dom dependency', workspaceRoot);
+              await gitPush('main', workspaceRoot);
             } catch (gitErr) {
               console.warn('[Auto-Fix] Git commands skipped or failed in simulation:', gitErr.message);
             }
@@ -645,7 +699,7 @@ export const autoFixAndRedeploy = async (req, res) => {
         simulationCounts[githubUrl] = (simulationCounts[githubUrl] || 0) + 1;
       }
     } else {
-      const workspaceRoot = path.dirname(process.cwd());
+      const workspaceRoot = await getRepositoryPath(githubUrl);
       const filesContext = {};
 
       const readSafe = (relPath) => {
@@ -677,9 +731,9 @@ export const autoFixAndRedeploy = async (req, res) => {
       }
 
       if (!dryRun && filesChanged.length > 0) {
-        await gitAdd();
-        await gitCommit('fix(deploy): resolve deployment build failure via AI auto-heal');
-        await gitPush();
+        await gitAdd(workspaceRoot);
+        await gitCommit('fix(deploy): resolve deployment build failure via AI auto-heal', workspaceRoot);
+        await gitPush('main', workspaceRoot);
       }
     }
 
