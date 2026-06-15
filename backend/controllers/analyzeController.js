@@ -1,5 +1,5 @@
 import Analysis from '../models/Analysis.js';
-import { fetchRepositoryInfo, fallbackAnalyze, generateFallbackReport } from '../services/githubService.js';
+import { fetchRepositoryInfo, generateFallbackReport } from '../services/githubService.js';
 import { aiAnalyze } from '../services/ollamaService.js';
 import { scanLocalDirectory, importDirectoryFiles } from '../services/localScanService.js';
 
@@ -17,20 +17,16 @@ export const analyzeRepository = async (req, res) => {
     // Fetch fresh files
     const repoInfo = await fetchRepositoryInfo(githubUrl);
     
-    // Run rule-based analysis (provides both final values and safety fallback values for the AI)
-    const ruleDetails = fallbackAnalyze(repoInfo);
+    // Run AI analysis
+    const aiDetails = await aiAnalyze(repoInfo);
 
-    // Run AI analysis (focuses only on fast core parameter extraction)
-    const aiDetails = await aiAnalyze(repoInfo, ruleDetails);
-
-    // Combine AI core details with fallback heuristics
     const mergedDetails = {
-      framework: aiDetails.framework || ruleDetails.framework,
-      database: aiDetails.database || ruleDetails.database,
-      dependencies: aiDetails.dependencies || ruleDetails.dependencies,
-      complexity: aiDetails.complexity || ruleDetails.complexity,
-      envVariables: aiDetails.envVariables || ruleDetails.envVariables,
-      dockerized: aiDetails.dockerized !== undefined ? aiDetails.dockerized : ruleDetails.dockerized
+      framework: aiDetails.framework,
+      database: aiDetails.database,
+      dependencies: aiDetails.dependencies,
+      complexity: aiDetails.complexity,
+      envVariables: aiDetails.envVariables,
+      dockerized: aiDetails.dockerized
     };
 
     // Dynamically compile the full 20-point checklist report
@@ -157,16 +153,15 @@ export const analyzeEditorCode = async (req, res) => {
       detectedLanguage: combinedPkg ? 'javascript' : (combinedReq ? 'python' : 'unknown')
     };
 
-    const ruleDetails = fallbackAnalyze(repoInfo);
-    const aiDetails = await aiAnalyze(repoInfo, ruleDetails);
+    const aiDetails = await aiAnalyze(repoInfo);
 
     const mergedDetails = {
-      framework: aiDetails.framework || ruleDetails.framework,
-      database: aiDetails.database || ruleDetails.database,
-      dependencies: aiDetails.dependencies || ruleDetails.dependencies,
-      complexity: aiDetails.complexity || ruleDetails.complexity,
-      envVariables: aiDetails.envVariables || ruleDetails.envVariables,
-      dockerized: aiDetails.dockerized !== undefined ? aiDetails.dockerized : ruleDetails.dockerized
+      framework: aiDetails.framework,
+      database: aiDetails.database,
+      dependencies: aiDetails.dependencies,
+      complexity: aiDetails.complexity,
+      envVariables: aiDetails.envVariables,
+      dockerized: aiDetails.dockerized
     };
 
     const finalReport = generateFallbackReport(repoInfo, mergedDetails);
@@ -219,16 +214,15 @@ export const analyzeLocalDirectory = async (req, res) => {
     // Check if there is an existing database record
     let analysis = await Analysis.findOne({ githubUrl: mockUrl });
 
-    const ruleDetails = fallbackAnalyze(repoInfo);
-    const aiDetails = await aiAnalyze(repoInfo, ruleDetails);
+    const aiDetails = await aiAnalyze(repoInfo);
 
     const mergedDetails = {
-      framework: aiDetails.framework || ruleDetails.framework,
-      database: aiDetails.database || ruleDetails.database,
-      dependencies: aiDetails.dependencies || ruleDetails.dependencies,
-      complexity: aiDetails.complexity || ruleDetails.complexity,
-      envVariables: aiDetails.envVariables || ruleDetails.envVariables,
-      dockerized: aiDetails.dockerized !== undefined ? aiDetails.dockerized : ruleDetails.dockerized
+      framework: aiDetails.framework,
+      database: aiDetails.database,
+      dependencies: aiDetails.dependencies,
+      complexity: aiDetails.complexity,
+      envVariables: aiDetails.envVariables,
+      dockerized: aiDetails.dockerized
     };
 
     const finalReport = generateFallbackReport(repoInfo, mergedDetails);

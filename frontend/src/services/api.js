@@ -42,6 +42,11 @@ export const getDeploymentPlan = async (payload) => {
   return response.data;
 };
 
+export const triggerAutoDeployment = async (payload) => {
+  const response = await api.post('/deployment-plan/deploy', payload);
+  return response.data;
+};
+
 export const sendChatMessage = async (message, history = []) => {
   const response = await api.post('/chat', { message, history });
   return response.data;
@@ -59,6 +64,7 @@ export default {
   importLocalWorkspace,
   getRecommendation,
   getDeploymentPlan,
+  triggerAutoDeployment,
   sendChatMessage,
   getDashboardStats
 };

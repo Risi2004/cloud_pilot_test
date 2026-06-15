@@ -13,12 +13,12 @@ const getModelName = () => {
  * Sends a prompt to Ollama with a timeout.
  * Strips out markdown formatting to safely parse JSON if required.
  */
-export const queryOllama = async (prompt, systemPrompt = '') => {
+export const queryOllama = async (prompt, systemPrompt = '', format = undefined) => {
   const url = getOllamaUrl();
   const model = getModelName();
   
   try {
-    const response = await axios.post(url, {
+    const requestData = {
       model: model,
       prompt: systemPrompt ? `${systemPrompt}\n\nUser: ${prompt}` : prompt,
       stream: false,
@@ -27,7 +27,11 @@ export const queryOllama = async (prompt, systemPrompt = '') => {
         temperature: 0.3,
         num_predict: 800
       }
-    }, {
+    };
+    if (format) {
+      requestData.format = format;
+    }
+    const response = await axios.post(url, requestData, {
       timeout: 300000 // 5-minute timeout for local models
     });
 
@@ -64,7 +68,7 @@ const parseJSONSafely = (text) => {
 /**
  * Generates repository analysis via AI.
  */
-export const aiAnalyze = async (repoInfo, fallbackData) => {
+export const aiAnalyze = async (repoInfo) => {
   const systemPrompt = `You are a technical code analyzer. Analyze the provided repository files and structure, and output a JSON representation of the configuration.
 You MUST respond with ONLY a valid JSON object matching this structure:
 {
@@ -93,19 +97,67 @@ requirements.txt contents: ${repoInfo.requirementsTxt || 'none'}
   `;
 
   try {
-    const rawResponse = await queryOllama(filesSummary, systemPrompt);
+    const rawResponse = await queryOllama(filesSummary, systemPrompt, 'json');
     const parsed = parseJSONSafely(rawResponse);
+    let deps = parsed.dependencies || [];
+    if (!Array.isArray(deps)) {
+      if (deps && typeof deps === 'object') {
+        deps = Object.keys(deps);
+      } else if (typeof deps === 'string') {
+        deps = [deps];
+      } else {
+        deps = [];
+      }
+    }
+
+    let envs = parsed.envVariables || [];
+    if (!Array.isArray(envs)) {
+      if (envs && typeof envs === 'object') {
+        envs = Object.keys(envs);
+      } else if (typeof envs === 'string') {
+        envs = [envs];
+      } else {
+        envs = [];
+      }
+    }
+
+    let db = parsed.database || 'None';
+    if (db.toLowerCase() === 'mongodb') {
+      db = 'MongoDB';
+    } else if (db.toLowerCase() === 'postgresql' || db.toLowerCase() === 'postgres') {
+      db = 'PostgreSQL';
+    } else if (db.toLowerCase() === 'mysql') {
+      db = 'MySQL';
+    } else if (db.toLowerCase() === 'sqlite') {
+      db = 'SQLite';
+    } else if (db.toLowerCase() === 'none') {
+      db = 'None';
+    }
+
+    let fw = parsed.framework || 'unknown';
+    if (fw.toLowerCase() === 'express' || fw.toLowerCase() === 'express.js') {
+      fw = 'Express.js';
+    } else if (fw.toLowerCase() === 'nestjs' || fw.toLowerCase() === 'nest') {
+      fw = 'NestJS';
+    } else if (fw.toLowerCase() === 'react') {
+      fw = 'React (Vite/SPA)';
+    } else if (fw.toLowerCase() === 'nextjs' || fw.toLowerCase() === 'next.js') {
+      fw = 'Next.js';
+    } else if (fw.toLowerCase() === 'vue' || fw.toLowerCase() === 'vue.js') {
+      fw = 'Vue.js';
+    }
+
     return {
-      framework: parsed.framework || fallbackData.framework,
-      database: parsed.database || fallbackData.database,
-      dependencies: parsed.dependencies || fallbackData.dependencies,
-      complexity: parsed.complexity || fallbackData.complexity,
-      envVariables: parsed.envVariables || fallbackData.envVariables,
-      dockerized: parsed.dockerized !== undefined ? parsed.dockerized : fallbackData.dockerized
+      framework: fw,
+      database: db,
+      dependencies: deps,
+      complexity: parsed.complexity || 'Low',
+      envVariables: envs,
+      dockerized: parsed.dockerized !== undefined ? parsed.dockerized : false
     };
   } catch (e) {
-    console.warn('Ollama AI analysis failed, falling back to rule-based details.');
-    return fallbackData;
+    console.error(`Local Ollama model did not respond or failed to analyze: ${e.message}`);
+    throw e;
   }
 };
 
@@ -131,7 +183,7 @@ Do not write any conversational text. Only return the JSON.`;
   const promptInput = JSON.stringify(analysis);
 
   try {
-    const rawResponse = await queryOllama(promptInput, systemPrompt);
+    const rawResponse = await queryOllama(promptInput, systemPrompt, 'json');
     const parsed = parseJSONSafely(rawResponse);
     return {
       frontend: parsed.frontend || 'Vercel',
@@ -140,18 +192,8 @@ Do not write any conversational text. Only return the JSON.`;
       cost: parsed.cost || '$7 - $20/month'
     };
   } catch (e) {
-    console.warn('Ollama AI recommendation failed, using standard fallback.');
-    
-    // Heuristic fallback
-    const isFrontendOnly = ['React (Vite/SPA)', 'Vue.js', 'Next.js'].includes(analysis.framework) && analysis.database === 'None';
-    return {
-      frontend: 'Vercel',
-      backend: isFrontendOnly ? 'None' : 'Render',
-      reason: isFrontendOnly 
-        ? 'Excellent Jamstack choice. Frontends are best suited for Vercel\'s CDN Edge networks.'
-        : `Hybrid split: Frontend hosted on Vercel for fast loading; backend web service hosted on Render with a ${analysis.database || 'MongoDB'} connection.`,
-      cost: isFrontendOnly ? '$0/month (Free Tier)' : '$7 - $20/month (Hobby tiers)'
-    };
+    console.error(`Local Ollama model did not respond or failed to recommend: ${e.message}`);
+    throw e;
   }
 };
 
@@ -174,29 +216,15 @@ Keep it short, clear, and actionable. Only return the JSON.`;
   const promptInput = JSON.stringify({ analysis, recommendation });
 
   try {
-    const rawResponse = await queryOllama(promptInput, systemPrompt);
+    const rawResponse = await queryOllama(promptInput, systemPrompt, 'json');
     const parsed = parseJSONSafely(rawResponse);
     if (parsed.steps && Array.isArray(parsed.steps)) {
       return parsed.steps;
     }
     throw new Error('Invalid steps structure');
   } catch (e) {
-    console.warn('Ollama AI deployment plan failed, generating static checklist.');
-    
-    const steps = [];
-    if (recommendation.frontend && recommendation.frontend !== 'None') {
-      steps.push(`Step 1: Sign up on Vercel and import the GitHub repository.`);
-      steps.push(`Step 2: Configure the build settings. For Vite, set Build Command to 'npm run build' and Output Directory to 'dist'.`);
-    }
-    if (recommendation.backend && recommendation.backend !== 'None') {
-      steps.push(`Step 3: Create a Web Service on Render and link the GitHub repository.`);
-      steps.push(`Step 4: Configure environment variables on Render (PORT=10000, MONGODB_URI).`);
-    }
-    if (analysis.database && analysis.database !== 'None') {
-      steps.push(`Step 5: Access MongoDB Atlas, whitelist all IPs (0.0.0.0/0) or Render's IP range, and copy the connection string.`);
-    }
-    steps.push(`Step 6: Verify deployment by visiting the Vercel URL and testing backend endpoint connectivity.`);
-    return steps;
+    console.error(`Local Ollama model did not respond or failed to generate deployment plan: ${e.message}`);
+    throw e;
   }
 };
 

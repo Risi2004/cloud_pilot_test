@@ -33,8 +33,8 @@ ${docsText}
 Your output MUST be a valid JSON object matching the following structure EXACTLY:
 {
   "platformRecommendations": {
-    "frontend": "Vercel | Render | None",
-    "backend": "Vercel | Render | None",
+    "frontend": "Vercel",
+    "backend": "Render",
     "reason": "Detailed architectural explanation incorporating rules and documentation findings."
   },
   "costEstimate": {

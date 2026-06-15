@@ -1,8 +1,9 @@
 import express from 'express';
-import { getDeploymentPlan } from '../controllers/deploymentController.js';
+import { getDeploymentPlan, triggerAutoDeployment } from '../controllers/deploymentController.js';
 
 const router = express.Router();
 
 router.post('/', getDeploymentPlan);
+router.post('/deploy', triggerAutoDeployment);
 
 export default router;

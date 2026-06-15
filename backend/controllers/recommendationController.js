@@ -52,7 +52,7 @@ export const getRecommendation = async (req, res) => {
 
     await analysis.save();
 
-    return res.status(200).json(recommendations);
+    return res.status(200).json(analysis.recommendation);
   } catch (error) {
     console.error(`Recommendation Controller Error: ${error.message}`);
     return res.status(500).json({ error: `Recommendation failed: ${error.message}` });

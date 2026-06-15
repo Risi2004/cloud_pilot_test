@@ -231,9 +231,28 @@ export const extractEnvKeys = (envContent) => {
  * Generates fallback report structure mapping the full 20 detection checklist categories.
  */
 export const generateFallbackReport = (repoInfo, basic) => {
-  const deps = basic.dependencies || [];
+  let deps = basic.dependencies || [];
+  if (!Array.isArray(deps)) {
+    if (deps && typeof deps === 'object') {
+      deps = Object.keys(deps);
+    } else if (typeof deps === 'string') {
+      deps = [deps];
+    } else {
+      deps = [];
+    }
+  }
   const lowerDeps = deps.map(d => d.toLowerCase());
-  const envKeys = basic.envVariables || [];
+  
+  let envKeys = basic.envVariables || [];
+  if (!Array.isArray(envKeys)) {
+    if (envKeys && typeof envKeys === 'object') {
+      envKeys = Object.keys(envKeys);
+    } else if (typeof envKeys === 'string') {
+      envKeys = [envKeys];
+    } else {
+      envKeys = [];
+    }
+  }
   
   // Heuristic detections
   // 1. App Type
@@ -250,12 +269,50 @@ export const generateFallbackReport = (repoInfo, basic) => {
     appType = "SaaS Platform";
   }
 
+  // Normalize Database
+  let detectedDb = basic.database || 'None';
+  if (detectedDb.toLowerCase() === 'mongodb') {
+    detectedDb = 'MongoDB';
+  } else if (detectedDb.toLowerCase() === 'postgresql' || detectedDb.toLowerCase() === 'postgres') {
+    detectedDb = 'PostgreSQL';
+  } else if (detectedDb.toLowerCase() === 'mysql') {
+    detectedDb = 'MySQL';
+  } else if (detectedDb.toLowerCase() === 'sqlite') {
+    detectedDb = 'SQLite';
+  }
+  
+  if (detectedDb === 'None') {
+    if (deps.some(d => d === 'mongoose' || d === 'mongodb' || d.includes('pymongo'))) {
+      detectedDb = 'MongoDB';
+    } else if (deps.some(d => d === 'pg' || d.includes('postgres') || d.includes('psycopg2'))) {
+      detectedDb = 'PostgreSQL';
+    } else if (deps.some(d => d === 'mysql' || d === 'mysql2')) {
+      detectedDb = 'MySQL';
+    } else if (deps.some(d => d === 'sqlite3')) {
+      detectedDb = 'SQLite';
+    }
+  }
+
+  // Normalize Framework
+  const frameworkName = (basic.framework || '').toLowerCase();
+
   // 2. Architecture Type
-  const isFrontend = ['React (Vite/SPA)', 'Vue.js', 'Next.js', 'Angular', 'Svelte', 'Astro', 'Nuxt'].includes(basic.framework) && basic.database === 'None' && !deps.some(d => d.includes('express'));
-  const isBackend = ['Express.js', 'NestJS', 'Fastify', 'Django', 'Flask', 'FastAPI'].includes(basic.framework);
+  const hasExpress = deps.some(d => d === 'express' || d === 'fastify' || d === '@nestjs/core');
+  const hasPythonBackend = deps.some(d => ['django', 'flask', 'fastapi'].includes(d.toLowerCase()));
+  const hasBackendApp = frameworkName.includes('express') || frameworkName.includes('nest') || frameworkName.includes('fastify') || frameworkName.includes('django') || frameworkName.includes('flask') || frameworkName.includes('fastapi') || hasExpress || hasPythonBackend;
+
+  const hasReact = deps.some(d => d.includes('react') || d.includes('next') || d.includes('vue') || d.includes('svelte'));
+  const hasFrontendApp = ['react', 'vue', 'next', 'angular', 'svelte', 'astro', 'nuxt'].some(f => frameworkName.includes(f)) || hasReact;
+
   let archType = "Full Stack Application";
-  if (isFrontend) archType = "Frontend Only";
-  else if (isBackend && basic.database !== 'None') archType = "Backend Only";
+  if (hasFrontendApp && !hasBackendApp) {
+    archType = "Frontend Only";
+  } else if (hasBackendApp && !hasFrontendApp) {
+    archType = "Backend Only";
+  }
+
+  const isFrontend = archType === "Frontend Only";
+  const isBackend = archType === "Backend Only" || archType === "Full Stack Application";
 
   // 3. Frontend frameworks
   let feFramework = "None";
@@ -283,15 +340,24 @@ export const generateFallbackReport = (repoInfo, basic) => {
   // 7. Backend runtime/frameworks
   let beRuntime = "None";
   let beFramework = "None";
-  if (basic.framework === 'Express.js') {
+  if (frameworkName.includes('express') || deps.some(d => d === 'express')) {
     beRuntime = "Node.js (Express)";
     beFramework = "Express";
-  } else if (basic.framework === 'NestJS') {
+  } else if (frameworkName.includes('nest') || deps.some(d => d === '@nestjs/core')) {
     beRuntime = "Node.js (NestJS)";
     beFramework = "NestJS";
-  } else if (['Django', 'Flask', 'FastAPI'].includes(basic.framework)) {
-    beRuntime = `Python (${basic.framework})`;
-    beFramework = basic.framework;
+  } else if (frameworkName.includes('fastify') || deps.some(d => d === 'fastify')) {
+    beRuntime = "Node.js (Fastify)";
+    beFramework = "Fastify";
+  } else if (frameworkName.includes('django') || deps.some(d => d.toLowerCase().includes('django'))) {
+    beRuntime = "Python (Django)";
+    beFramework = "Django";
+  } else if (frameworkName.includes('flask') || deps.some(d => d.toLowerCase().includes('flask'))) {
+    beRuntime = "Python (Flask)";
+    beFramework = "Flask";
+  } else if (frameworkName.includes('fastapi') || deps.some(d => d.toLowerCase().includes('fastapi'))) {
+    beRuntime = "Python (FastAPI)";
+    beFramework = "FastAPI";
   }
 
   // 8. ORMs
@@ -363,7 +429,6 @@ export const generateFallbackReport = (repoInfo, basic) => {
   if (deps.some(d => d.includes('google-analytics'))) thirdPartyAnalytics = "Google Analytics";
 
   // 15. Env Variables
-  // envKeys defined early
   const sensitiveKeys = envKeys.filter(k => 
     /SECRET|KEY|PASSWORD|TOKEN|AUTH|CREDENTIAL|PRIVATE/i.test(k)
   );
@@ -395,11 +460,11 @@ export const generateFallbackReport = (repoInfo, basic) => {
     feComp = "Medium";
     beComp = "Medium";
   }
-  if (basic.database !== "None") dbComp = "Medium";
+  if (detectedDb !== "None") dbComp = "Medium";
 
   let complexityScore = 20;
   complexityScore += deps.length * 1.5;
-  if (basic.database !== "None") complexityScore += 15;
+  if (detectedDb !== "None") complexityScore += 15;
   if (authMethod !== "None") complexityScore += 15;
   if (aiProviders.length > 0) complexityScore += 20;
   complexityScore = Math.min(100, Math.round(complexityScore));
@@ -428,17 +493,17 @@ export const generateFallbackReport = (repoInfo, basic) => {
   let feCost = "$0/month (Free Tier)";
   let beCost = "$0/month (Free Tier)";
   let dbCost = "$0/month (Shared Tier)";
-  if (basic.framework === "Express.js" || isBackend) {
+  if (beFramework !== "None" || hasBackendApp) {
     beCost = "$7/month (Hobby Tier)";
   }
-  if (basic.database !== "None") {
+  if (detectedDb !== "None") {
     dbCost = "$0/month (MongoDB Atlas Free Shared)";
   }
-  let estCost = isFrontend ? "$0/month (Vercel Free)" : "$7 - $20/month (Vercel Free + Render Hobby)";
+  let estCost = hasFrontendApp && !hasBackendApp ? "$0/month (Vercel Free)" : "$7 - $20/month (Vercel Free + Render Hobby)";
 
   // 20. Scalability Estimates
   let scalingDiff = "Low";
-  if (basic.database !== "None") scalingDiff = "Medium";
+  if (detectedDb !== "None") scalingDiff = "Medium";
   if (aiProviders.length > 0) scalingDiff = "Medium";
 
   return {
@@ -447,7 +512,7 @@ export const generateFallbackReport = (repoInfo, basic) => {
     architectureType: archType,
     frontendStack: feFramework !== "None" ? `${feFramework} (Build: ${buildTool}, UI: ${uiLibrary})` : "None",
     backendStack: beFramework !== "None" ? `${beFramework} on ${beRuntime}` : "None",
-    databaseStack: basic.database !== "None" ? `${basic.database} (Managed: ${basic.database === "MongoDB" ? "MongoDB Atlas" : "Supabase"}, ORM: ${orm})` : "None",
+    databaseStack: detectedDb !== "None" ? `${detectedDb} (Managed: ${detectedDb === "MongoDB" ? "MongoDB Atlas" : "Supabase"}, ORM: ${orm})` : "None",
     authentication: authMethod,
     storage: storageProvider,
     payments: paymentProvider,
@@ -457,106 +522,17 @@ export const generateFallbackReport = (repoInfo, basic) => {
     securityScore: securityScore,
     complexityScore: complexityScore,
     deploymentReadinessScore: readinessScore,
-    hostingRecommendation: `${isFrontend ? "Frontend: Vercel" : ""} ${isBackend ? "Backend: Render" : ""} ${basic.database !== "None" ? `Database: ${basic.database === "MongoDB" ? "MongoDB Atlas" : "Supabase"}` : ""}`.trim(),
+    hostingRecommendation: `${hasFrontendApp ? "Frontend: Vercel" : ""} ${hasBackendApp ? "Backend: Render" : ""} ${detectedDb !== "None" ? `Database: ${detectedDb === "MongoDB" ? "MongoDB Atlas" : "Supabase"}` : ""}`.trim(),
     estimatedMonthlyCost: estCost,
-    scalabilityAnalysis: `User Capacity: ${isFrontend ? "Up to 50k users/month" : "Up to 10k users/month"}. Difficulty: ${scalingDiff}. Growth: Upgrade CPU/RAM tiers as needed.`,
+    scalabilityAnalysis: `User Capacity: ${hasFrontendApp && !hasBackendApp ? "Up to 50k users/month" : "Up to 10k users/month"}. Difficulty: ${scalingDiff}. Growth: Upgrade CPU/RAM tiers as needed.`,
     deploymentDifficulty: complexityScore > 70 ? "High" : complexityScore > 30 ? "Medium" : "Low",
     requiredEnvironmentVariables: envKeys,
     recommendedDeploymentPlan: [
-      `Deploy Frontend: Link repository to Vercel and configure root settings.`,
-      isBackend ? `Deploy Backend API: Setup web service container on Render.` : null,
-      basic.database !== "None" ? `Link MongoDB connection string under environment variables.` : null
+      hasFrontendApp ? `Deploy Frontend: Link repository to Vercel and configure root settings.` : null,
+      hasBackendApp ? `Deploy Backend API: Setup web service container on Render.` : null,
+      detectedDb !== "None" ? `Link database connection string under environment variables.` : null
     ].filter(Boolean)
   };
 };
 
-/**
- * Robust local rule-based analysis (used as a fallback if Ollama is down)
- */
-export const fallbackAnalyze = (repoInfo) => {
-  const result = {
-    framework: 'React/Node.js',
-    database: 'None',
-    dependencies: [],
-    complexity: 'Medium',
-    envVariables: [],
-    dockerized: false,
-    report: null
-  };
 
-  // Parse environment variables
-  if (repoInfo.envExample) {
-    result.envVariables = extractEnvKeys(repoInfo.envExample);
-  }
-
-  // Detect Docker configuration
-  if (repoInfo.dockerfile) {
-    result.dockerized = true;
-  }
-
-  if (repoInfo.packageJson) {
-    const pkg = typeof repoInfo.packageJson === 'string' 
-      ? JSON.parse(repoInfo.packageJson) 
-      : repoInfo.packageJson;
-      
-    const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
-    result.dependencies = Object.keys(deps);
-
-    // Framework detection
-    if (deps['next'] || repoInfo.nextConfig) {
-      result.framework = 'Next.js';
-    } else if (deps['react'] || repoInfo.viteConfig) {
-      result.framework = 'React (Vite/SPA)';
-    } else if (deps['express']) {
-      result.framework = 'Express.js';
-    } else if (deps['@nestjs/core']) {
-      result.framework = 'NestJS';
-    } else if (deps['vue']) {
-      result.framework = 'Vue.js';
-    }
-
-    // Database detection
-    if (deps['mongoose'] || deps['mongodb']) {
-      result.database = 'MongoDB';
-    } else if (deps['pg'] || deps['sequelize'] && result.dependencies.some(d => d.includes('pg'))) {
-      result.database = 'PostgreSQL';
-    } else if (deps['mysql2'] || deps['mysql']) {
-      result.database = 'MySQL';
-    } else if (deps['sqlite3']) {
-      result.database = 'SQLite';
-    }
-
-    // Complexity heuristic
-    const depCount = result.dependencies.length;
-    if (depCount > 30) {
-      result.complexity = 'High';
-    } else if (depCount > 10) {
-      result.complexity = 'Medium';
-    } else {
-      result.complexity = 'Low';
-    }
-  } else if (repoInfo.requirementsTxt) {
-    result.framework = 'Python';
-    const lines = repoInfo.requirementsTxt.split('\n');
-    result.dependencies = lines.map(line => line.split('==')[0].trim()).filter(Boolean);
-    
-    if (result.dependencies.some(d => d.toLowerCase().includes('django'))) {
-      result.framework = 'Django';
-    } else if (result.dependencies.some(d => d.toLowerCase().includes('flask'))) {
-      result.framework = 'Flask';
-    } else if (result.dependencies.some(d => d.toLowerCase().includes('fastapi'))) {
-      result.framework = 'FastAPI';
-    }
-
-    if (result.dependencies.some(d => d.toLowerCase().includes('pymongo') || d.toLowerCase().includes('mongo'))) {
-      result.database = 'MongoDB';
-    } else if (result.dependencies.some(d => d.toLowerCase().includes('psycopg2') || d.toLowerCase().includes('postgres'))) {
-      result.database = 'PostgreSQL';
-    }
-  }
-
-  // Compile full 20-point report checklist object
-  result.report = generateFallbackReport(repoInfo, result);
-
-  return result;
-};
