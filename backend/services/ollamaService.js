@@ -253,3 +253,40 @@ Keep answers concise, clear, and helpful. Use markdown code snippets for environ
     return "I'm sorry, I am currently having trouble connecting to my local AI engine. I specialize in deploying static frontends to Vercel and web servers to Render. Please ensure Ollama is running locally with the qwen3:8b model, or let me know how I can help you manually!";
   }
 };
+
+/**
+ * AI Code Fixer that resolves build failures based on logs.
+ */
+export const aiFixCode = async (errorLogs, filesContext) => {
+  const systemPrompt = `You are an expert software developer and cloud deployment engineer.
+Analyze the provided build/deployment error logs and the context of the repository files.
+Determine exactly why the build is failing and how to correct it.
+You MUST output ONLY a valid JSON object matching this structure:
+{
+  "explanation": "Brief, human-friendly explanation of why the build failed.",
+  "solution": "Brief description of the fix to be applied.",
+  "filesToChange": [
+    {
+      "path": "path/to/file/relative/to/root (e.g. frontend/package.json)",
+      "content": "Full replacement content for the file with the fix applied."
+    }
+  ]
+}
+Ensure the content is syntactically correct and preserves the original formatting as much as possible. Do not output any conversational text or markdown blocks, only return the JSON.`;
+
+  const prompt = `Build Error Logs:\n${errorLogs}\n\nRepository files and contents:\n${JSON.stringify(filesContext)}`;
+
+  try {
+    const rawResponse = await queryOllama(prompt, systemPrompt, 'json');
+    const parsed = parseJSONSafely(rawResponse);
+    return parsed;
+  } catch (e) {
+    console.error(`Local Ollama failed to suggest build fix: ${e.message}`);
+    return {
+      explanation: "Build failed due to missing module or script configuration.",
+      solution: "Add missing dependencies to package.json.",
+      filesToChange: []
+    };
+  }
+};
+

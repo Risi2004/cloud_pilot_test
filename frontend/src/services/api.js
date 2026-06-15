@@ -47,6 +47,16 @@ export const triggerAutoDeployment = async (payload) => {
   return response.data;
 };
 
+export const getDeploymentStatus = async (payload) => {
+  const response = await api.post('/deployment-plan/status', payload);
+  return response.data;
+};
+
+export const autoFixAndRedeploy = async (payload) => {
+  const response = await api.post('/deployment-plan/auto-fix', payload);
+  return response.data;
+};
+
 export const sendChatMessage = async (message, history = []) => {
   const response = await api.post('/chat', { message, history });
   return response.data;
@@ -65,6 +75,9 @@ export default {
   getRecommendation,
   getDeploymentPlan,
   triggerAutoDeployment,
+  getDeploymentStatus,
+  autoFixAndRedeploy,
   sendChatMessage,
   getDashboardStats
 };
+

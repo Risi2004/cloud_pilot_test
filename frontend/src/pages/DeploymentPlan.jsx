@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { getDeploymentPlan, triggerAutoDeployment } from '../services/api';
+import axios from 'axios';
+import { getDeploymentPlan, triggerAutoDeployment, getDeploymentStatus, autoFixAndRedeploy } from '../services/api';
 import LoadingSpinner from '../components/LoadingSpinner';
+import DashboardSimulator from '../components/DashboardSimulator';
 import '../styles/cards.css';
 import '../styles/forms.css';
 import '../styles/wizard.css';
@@ -34,6 +36,9 @@ const DeploymentPlan = () => {
   const [visibleLogs, setVisibleLogs] = useState([]);
   const [deployResult, setDeployResult] = useState(null);
   const [deployError, setDeployError] = useState('');
+  const [healingState, setHealingState] = useState({ active: false, explanation: '', solution: '', filesChanged: [], provider: '', errorLogs: '' });
+  const [isFixing, setIsFixing] = useState(false);
+  const pollIntervalRef = useRef(null);
 
   const location = useLocation();
   const navigate = useNavigate();
@@ -170,6 +175,263 @@ const DeploymentPlan = () => {
     }));
   };
 
+  // Import environment variables from a selected local file (.env)
+  const handleEnvImport = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target.result;
+      const parsed = {};
+      const newKeys = [];
+
+      text.split(/\r?\n/).forEach(line => {
+        const trimmed = line.trim();
+        // Skip comments and empty lines
+        if (trimmed && !trimmed.startsWith('#')) {
+          const equalsIdx = trimmed.indexOf('=');
+          if (equalsIdx !== -1) {
+            const k = trimmed.substring(0, equalsIdx).trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+            const v = trimmed.substring(equalsIdx + 1).trim();
+            if (k) {
+              parsed[k] = v;
+              newKeys.push(k);
+            }
+          }
+        }
+      });
+
+      if (Object.keys(parsed).length > 0) {
+        setCustomEnvVars(prev => ({
+          ...prev,
+          ...parsed
+        }));
+        setEnvKeysList(prev => {
+          const updated = [...prev];
+          newKeys.forEach(k => {
+            if (!updated.includes(k)) {
+              updated.push(k);
+            }
+          });
+          return updated;
+        });
+      } else {
+        alert("No valid environment variables (KEY=value format) found in the selected file.");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = ''; // Reset input
+  };
+
+  // Cleanup interval on unmount
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+      }
+    };
+  }, []);
+
+  const startPollingStatus = (statusInfo, initialLogs) => {
+    let baseLogs = [...initialLogs];
+    
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+    }
+    
+    const poll = async () => {
+      try {
+        const payload = {
+          vercelDeploymentId: statusInfo.vercel?.id,
+          renderServiceId: statusInfo.render?.serviceId,
+          renderDeployId: statusInfo.render?.deployId,
+          vercelToken,
+          renderApiKey,
+          githubUrl
+        };
+        
+        const statusRes = await getDeploymentStatus(payload);
+        const { vercel, render } = statusRes;
+        
+        const vercelLogs = vercel?.logs || [];
+        const renderLogs = render?.logs || [];
+        
+        setVisibleLogs([
+          ...baseLogs,
+          ...vercelLogs.map(l => `[Vercel] ${l}`),
+          ...renderLogs.map(l => `[Render] ${l}`)
+        ]);
+        
+        const vercelFailed = vercel?.status === 'ERROR';
+        const renderFailed = ['build_failed', 'update_failed', 'pre_deploy_failed'].includes(render?.status);
+        
+        if (vercelFailed || renderFailed) {
+          clearInterval(pollIntervalRef.current);
+          setDeploying(false);
+          
+          const failedProvider = vercelFailed ? 'vercel' : 'render';
+          const errorLogs = vercelFailed 
+            ? (vercelLogs.join('\n') || vercel.error || 'Vercel build failure') 
+            : (renderLogs.join('\n') || render.error || 'Render build failure');
+            
+          setVisibleLogs(prev => [
+            ...prev,
+            `[Agent] Detected build failure on ${failedProvider === 'vercel' ? 'Vercel' : 'Render'}. Halted log stream.`,
+            `[Agent] Analysing build failures and generating recovery options via local AI model...`
+          ]);
+          
+          try {
+            const fixProposal = await autoFixAndRedeploy({
+              githubUrl,
+              errorLogs,
+              provider: failedProvider,
+              vercelToken,
+              renderApiKey,
+              dryRun: true
+            });
+            
+            setHealingState({
+              active: true,
+              explanation: fixProposal.explanation,
+              solution: fixProposal.solution,
+              filesChanged: fixProposal.filesChanged,
+              provider: failedProvider,
+              errorLogs: errorLogs
+            });
+          } catch (proposalErr) {
+            console.error('Failed to get recovery proposal:', proposalErr);
+            setDeployError(`Deployment failed on ${failedProvider}. Auto-healing query failed: ${proposalErr.message}`);
+          }
+          return;
+        }
+        
+        const vercelActive = !!statusInfo.vercel?.id;
+        const renderActive = !!statusInfo.render?.serviceId;
+        
+        const vercelDone = !vercelActive || vercel?.status === 'READY';
+        const renderDone = !renderActive || render?.status === 'live';
+        
+        if (vercelDone && renderDone) {
+          clearInterval(pollIntervalRef.current);
+          setDeploying(false);
+          
+          const finalStatus = {
+            vercel: {
+              success: vercelActive ? vercel?.status === 'READY' : statusInfo.vercel?.success,
+              url: vercelActive ? `https://${projectName}-frontend.vercel.app` : statusInfo.vercel?.url,
+              error: vercelActive ? vercel?.error : statusInfo.vercel?.error,
+              id: statusInfo.vercel?.id
+            },
+            render: {
+              success: renderActive ? render?.status === 'live' : statusInfo.render?.success,
+              url: renderActive ? `https://${projectName}-backend.onrender.com` : statusInfo.render?.url,
+              error: renderActive ? render?.error : statusInfo.render?.error,
+              serviceId: statusInfo.render?.serviceId,
+              deployId: statusInfo.render?.deployId
+            }
+          };
+          
+          setDeployResult(finalStatus);
+          setVisibleLogs(prev => [
+            ...prev,
+            `[Agent] Deployment verified. All environments successfully provisioned and live! 🎉`
+          ]);
+          setWizardStep(5);
+        }
+      } catch (err) {
+        console.error('Error polling status:', err);
+      }
+    };
+    
+    poll();
+    pollIntervalRef.current = setInterval(poll, 3000);
+  };
+
+  const handleAutoFix = async () => {
+    setIsFixing(true);
+    setHealingState(prev => ({ ...prev, active: false }));
+    
+    setVisibleLogs(prev => [
+      ...prev,
+      `[Agent] Auto-Fix approved by user. Executing code corrections...`,
+      `[Agent] [Auto-Healing] Initiating healing loop for ${healingState.provider}...`,
+      `[Agent] [Auto-Healing] Staging files for commit...`,
+      `[Agent] [Auto-Healing] Committing corrections...`,
+      `[Agent] [Auto-Healing] Git add: staged ${healingState.filesChanged.join(', ')}`,
+      `[Agent] [Auto-Healing] Git commit: fix(deploy): resolve build errors`,
+      `[Agent] [Auto-Healing] Pushing changes to remote main branch...`,
+      `[Agent] [Auto-Healing] Git push: successfully pushed Main -> Main`
+    ]);
+
+    try {
+      const fixResult = await autoFixAndRedeploy({
+        githubUrl,
+        errorLogs: healingState.errorLogs,
+        provider: healingState.provider,
+        vercelToken,
+        renderApiKey,
+        dryRun: false
+      });
+      
+      if (fixResult.success) {
+        setVisibleLogs(prev => [
+          ...prev,
+          `[Agent] Auto-Fix corrections successfully applied and pushed to GitHub!`,
+          `[Agent] Triggering redeployment pipeline on cloud services...`
+        ]);
+        
+        const skipVercel = healingState.provider !== 'vercel';
+        const skipRender = healingState.provider !== 'render';
+        
+        const payload = {
+          githubUrl,
+          vercelToken,
+          renderApiKey,
+          config: {
+            projectName,
+            frontendTier: projectScale,
+            backendTier: projectScale,
+            envVars: customEnvVars,
+            skipRender,
+            skipVercel,
+            renderUrl: deployResult?.render?.url || `https://${projectName}-backend.onrender.com`,
+            vercelUrl: deployResult?.vercel?.url
+          }
+        };
+        
+        const result = await triggerAutoDeployment(payload);
+        setIsFixing(false);
+        setDeploying(true);
+        
+        const serverLogs = result.logs || [];
+        let currentLogIdx = 0;
+        
+        const newBaseLogs = [...visibleLogs, ...serverLogs];
+        
+        const interval = setInterval(() => {
+          if (currentLogIdx < serverLogs.length) {
+            setVisibleLogs(prev => [...prev, serverLogs[currentLogIdx]]);
+            currentLogIdx++;
+          } else {
+            clearInterval(interval);
+            startPollingStatus(result.status, newBaseLogs);
+          }
+        }, 700);
+      } else {
+        throw new Error(fixResult.error || 'Auto-Fix application failed');
+      }
+    } catch (err) {
+      console.error('Auto-Fix or redeployment trigger failed:', err);
+      setIsFixing(false);
+      setDeployError(err.message || 'Auto-Fix healing flow encountered an error.');
+      setVisibleLogs(prev => [
+        ...prev,
+        `[Agent] [Error] Auto-healing halted: ${err.message || 'Unknown error'}`
+      ]);
+    }
+  };
+
   // Trigger Deployment API Call
   const handleStartDeployment = async () => {
     setWizardStep(4);
@@ -203,15 +465,23 @@ const DeploymentPlan = () => {
           currentLogIdx++;
         } else {
           clearInterval(interval);
-          setDeploying(false);
-          setDeployResult(result.status);
-          setWizardStep(5);
+          startPollingStatus(result.status, serverLogs);
         }
       }, 700);
 
     } catch (err) {
       console.error('Deployment execution failed:', err);
-      const errorMessage = err.response?.data?.error || err.message || 'Unknown integration gateway error';
+      let errorMessage = 'Unknown integration gateway error';
+      if (err.response?.data) {
+        const data = err.response.data;
+        if (data.error) {
+          errorMessage = typeof data.error === 'object' ? (data.error.message || JSON.stringify(data.error)) : data.error;
+        } else if (data.message) {
+          errorMessage = data.message;
+        }
+      } else if (err.message) {
+        errorMessage = err.message;
+      }
       
       // Print error log in terminal
       setVisibleLogs(prev => [
@@ -224,7 +494,74 @@ const DeploymentPlan = () => {
     }
   };
 
+  // Trigger a retry for only the failed components
+  const handleRetryDeployment = async ({ skipVercel, skipRender }) => {
+    setWizardStep(4);
+    setDeploying(true);
+    setDeployError('');
+    setVisibleLogs([
+      `[Agent] Initializing selective retry (Skip Vercel: ${skipVercel ? 'Yes' : 'No'}, Skip Render: ${skipRender ? 'Yes' : 'No'})...`
+    ]);
+
+    try {
+      const payload = {
+        githubUrl,
+        vercelToken,
+        renderApiKey,
+        config: {
+          projectName,
+          frontendTier: projectScale,
+          backendTier: projectScale,
+          envVars: customEnvVars,
+          skipRender,
+          skipVercel,
+          renderUrl: deployResult?.render?.url,
+          vercelUrl: deployResult?.vercel?.url
+        }
+      };
+
+      const result = await triggerAutoDeployment(payload);
+
+      const serverLogs = result.logs || [];
+      let currentLogIdx = 0;
+      
+      const interval = setInterval(() => {
+        if (currentLogIdx < serverLogs.length) {
+          setVisibleLogs(prev => [...prev, serverLogs[currentLogIdx]]);
+          currentLogIdx++;
+        } else {
+          clearInterval(interval);
+          startPollingStatus(result.status, serverLogs);
+        }
+      }, 700);
+
+    } catch (err) {
+      console.error('Retry execution failed:', err);
+      let errorMessage = 'Unknown integration gateway error';
+      if (err.response?.data) {
+        const data = err.response.data;
+        if (data.error) {
+          errorMessage = typeof data.error === 'object' ? (data.error.message || JSON.stringify(data.error)) : data.error;
+        } else if (data.message) {
+          errorMessage = data.message;
+        }
+      } else if (err.message) {
+        errorMessage = err.message;
+      }
+      
+      setVisibleLogs(prev => [
+        ...prev,
+        `[Agent] [Error] Retry deployment halted: ${errorMessage}`
+      ]);
+      setDeploying(false);
+      setDeployError(errorMessage);
+    }
+  };
+
   const handleResetWizard = () => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+    }
     setWizardStep(1);
     setDeployResult(null);
     setDeployError('');
@@ -508,7 +845,28 @@ const DeploymentPlan = () => {
 
                   {/* Add manual Env Form */}
                   <div style={{ background: 'rgba(255, 255, 255, 0.01)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: '1.25rem', marginTop: '2rem' }}>
-                    <div style={{ fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.75rem' }}>Add Custom Environment Secret</div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                      <div style={{ fontSize: '0.875rem', fontWeight: '600' }}>Add Custom Environment Secret</div>
+                      <div>
+                        <input 
+                          type="file" 
+                          accept=".env,.txt,*" 
+                          onChange={handleEnvImport} 
+                          style={{ display: 'none' }} 
+                          id="env-file-upload" 
+                        />
+                        <label 
+                          htmlFor="env-file-upload" 
+                          className="btn btn-secondary" 
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', padding: '0.4rem 0.8rem', fontSize: '0.85rem', userSelect: 'none' }}
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                          </svg>
+                          Import .env File
+                        </label>
+                      </div>
+                    </div>
                     <div style={{ display: 'flex', gap: '0.75rem' }}>
                       <input 
                         type="text"
@@ -559,67 +917,83 @@ const DeploymentPlan = () => {
                 </div>
               )}
 
-              {/* STEP 4: ACTIVE DEPLOYMENT TERMINAL LOGS */}
+              {/* STEP 4: ACTIVE DEPLOYMENT TERMINAL LOGS WITH VIRTUAL SIMULATOR */}
               {wizardStep === 4 && (
-                <div className="wizard-step-card">
+                <div className="wizard-step-card" style={{ maxWidth: '1200px', width: '100%', position: 'relative' }}>
                   <h2 className="wizard-step-title" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                     Deploying Resources
-                    {deploying && <div className="pulse-indicator" />}
+                    {(deploying || isFixing) && <div className="pulse-indicator" />}
                   </h2>
                   <p className="wizard-step-subtitle">
-                    The CloudPilot agent is registering Vercel and Render targets, configuring subdirectories, injecting variables, and triggering the build systems.
+                    {isFixing
+                      ? 'The CloudPilot agent is automatically applying code corrections, committing/pushing to GitHub, and restarting the build pipeline...'
+                      : 'The CloudPilot agent is registering Vercel and Render targets, configuring subdirectories, injecting variables, and triggering the build systems.'
+                    }
                   </p>
 
-                  <div className="terminal-container">
-                    <div className="terminal-header">
-                      <div className="terminal-dots">
-                        <div className="terminal-dot red" />
-                        <div className="terminal-dot yellow" />
-                        <div className="terminal-dot green" />
-                      </div>
-                      <div className="terminal-title">cloudpilot-agent@deployer:~</div>
-                      <div />
-                    </div>
-                    <div className="terminal-body">
-                      {visibleLogs.map((logLine, idx) => {
-                        let formattedLine = logLine;
-                        
-                        // Style keys inside output
-                        if (logLine.includes('[Simulation]')) {
-                          formattedLine = logLine.replace('[Simulation]', '');
-                          return (
-                            <div key={idx} className="terminal-line">
-                              <span className="sim-prefix">[Simulation]</span>
-                              {formattedLine}
-                            </div>
-                          );
-                        } else if (logLine.startsWith('[Agent]')) {
-                          formattedLine = logLine.replace('[Agent]', '');
-                          return (
-                            <div key={idx} className="terminal-line">
-                              <span className="agent-prefix">[Agent]</span>
-                              {formattedLine}
-                            </div>
-                          );
-                        }
-                        
-                        return (
-                          <div key={idx} className="terminal-line">
-                            {logLine}
+                  <div className="deployment-split-grid">
+                    {/* Left: Terminal logs */}
+                    <div>
+                      <div className="terminal-container" style={{ height: '520px', display: 'flex', flexDirection: 'column', marginBottom: 0 }}>
+                        <div className="terminal-header">
+                          <div className="terminal-dots">
+                            <div className="terminal-dot red" />
+                            <div className="terminal-dot yellow" />
+                            <div className="terminal-dot green" />
                           </div>
-                        );
-                      })}
-                      {deploying && (
-                        <div className="terminal-line">
-                          <span className="terminal-cursor" />
+                          <div className="terminal-title">cloudpilot-agent@deployer:~</div>
+                          <div />
                         </div>
-                      )}
-                      <div ref={terminalEndRef} />
+                        <div className="terminal-body" style={{ flexGrow: 1, maxHeight: 'none' }}>
+                          {visibleLogs.map((logLine, idx) => {
+                            let formattedLine = logLine;
+                            
+                            // Style keys inside output
+                            if (logLine.includes('[Simulation]')) {
+                              formattedLine = logLine.replace('[Simulation]', '');
+                              return (
+                                <div key={idx} className="terminal-line">
+                                  <span className="sim-prefix">[Simulation]</span>
+                                  {formattedLine}
+                                </div>
+                              );
+                            } else if (logLine.startsWith('[Agent]')) {
+                              formattedLine = logLine.replace('[Agent]', '');
+                              return (
+                                <div key={idx} className="terminal-line">
+                                  <span className="agent-prefix">[Agent]</span>
+                                  {formattedLine}
+                                </div>
+                              );
+                            }
+                            
+                            return (
+                              <div key={idx} className="terminal-line">
+                                {logLine}
+                              </div>
+                            );
+                          })}
+                          {(deploying || isFixing) && (
+                            <div className="terminal-line">
+                              <span className="terminal-cursor" />
+                            </div>
+                          )}
+                          <div ref={terminalEndRef} />
+                        </div>
+                      </div>
                     </div>
+
+                    {/* Right: Simulated dashboard monitor */}
+                    <DashboardSimulator 
+                      visibleLogs={visibleLogs}
+                      projectName={projectName}
+                      projectScale={projectScale}
+                      envVars={customEnvVars}
+                    />
                   </div>
 
                   {deployError && (
-                    <div className="wizard-footer-actions" style={{ borderColor: 'rgba(239, 68, 68, 0.2)' }}>
+                    <div className="wizard-footer-actions" style={{ borderColor: 'rgba(239, 68, 68, 0.2)', marginTop: '1.5rem' }}>
                       <span style={{ color: '#ef4444', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                         ✕ Deployment failed: {deployError}
                       </span>
@@ -629,6 +1003,71 @@ const DeploymentPlan = () => {
                       >
                         Back to Configuration
                       </button>
+                    </div>
+                  )}
+
+                  {/* Glassmorphic Auto-Fix Proposal Dialog overlay */}
+                  {healingState.active && (
+                    <div className="auto-fix-dialog-backdrop">
+                      <div className="auto-fix-dialog glass-card animate-scale-in">
+                        <div className="auto-fix-header">
+                          <span className="auto-fix-warning-icon">⚡</span>
+                          <h3>AI Auto-Fix Deployment Proposal</h3>
+                        </div>
+                        <div className="auto-fix-body">
+                          <p style={{ marginBottom: '1.25rem', color: 'white', fontWeight: 500, fontSize: '0.95rem' }}>
+                            Detected build failure on <strong>{healingState.provider === 'vercel' ? 'Vercel' : 'Render'}</strong>.
+                          </p>
+                          
+                          <div style={{ marginBottom: '1.25rem' }}>
+                            <strong style={{ color: '#fff', fontSize: '0.85rem' }}>AI Explanation:</strong>
+                            <p style={{ marginTop: '0.35rem', fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                              {healingState.explanation}
+                            </p>
+                          </div>
+
+                          <div style={{ marginBottom: '1.25rem' }}>
+                            <strong style={{ color: '#fff', fontSize: '0.85rem' }}>Suggested Solution:</strong>
+                            <p style={{ marginTop: '0.35rem', fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                              {healingState.solution}
+                            </p>
+                          </div>
+
+                          {healingState.filesChanged && healingState.filesChanged.length > 0 && (
+                            <div style={{ marginBottom: '1.25rem' }}>
+                              <strong style={{ color: '#fff', fontSize: '0.85rem' }}>Files to modify:</strong>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.4rem' }}>
+                                {healingState.filesChanged.map(file => (
+                                  <code key={file} style={{ background: 'rgba(255, 255, 255, 0.08)', padding: '0.2rem 0.4rem', borderRadius: '4px', fontSize: '0.75rem', color: '#c084fc', border: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                                    {file}
+                                  </code>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          <p style={{ marginTop: '1.5rem', fontSize: '0.85rem', color: '#93c5fd', fontWeight: 500, lineHeight: 1.4 }}>
+                            Allow CloudPilot agent to write fixes locally, commit & push to GitHub, and redeploy?
+                          </p>
+                        </div>
+                        <div className="auto-fix-actions">
+                          <button 
+                            className="btn btn-secondary"
+                            onClick={() => {
+                              setHealingState(prev => ({ ...prev, active: false }));
+                              setDeployError('Auto-healing declined by user.');
+                            }}
+                          >
+                            No, Cancel Deploy
+                          </button>
+                          <button 
+                            className="btn btn-accent btn-glowing"
+                            onClick={handleAutoFix}
+                          >
+                            Yes, Auto-Fix & Redeploy
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -687,8 +1126,36 @@ const DeploymentPlan = () => {
                           </div>
                         </>
                       ) : (
-                        <div style={{ color: '#ef4444', fontSize: '0.825rem' }}>
-                          Error: {deployResult.render?.error || 'Provisioning failed.'}
+                        <div>
+                          <div style={{ color: '#ef4444', fontSize: '0.825rem', marginBottom: '1rem' }}>
+                            Error: {deployResult.render?.error ? (typeof deployResult.render.error === 'object' ? (deployResult.render.error.message || JSON.stringify(deployResult.render.error)) : String(deployResult.render.error)) : 'Provisioning failed.'}
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', background: 'rgba(0,0,0,0.2)', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid rgba(255,255,255,0.05)' }}>
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600 }}>Interactive Retry:</div>
+                            <input 
+                              type="text" 
+                              className="form-input" 
+                              placeholder="Project Name (e.g. foodloop-backend-v3)"
+                              value={projectName}
+                              onChange={(e) => setProjectName(e.target.value)}
+                              style={{ fontSize: '0.75rem', padding: '0.35rem 0.5rem', height: 'auto' }}
+                            />
+                            <input 
+                              type="password" 
+                              className="form-input" 
+                              placeholder="Update Render API Key"
+                              value={renderApiKey}
+                              onChange={(e) => setRenderApiKey(e.target.value)}
+                              style={{ fontSize: '0.75rem', padding: '0.35rem 0.5rem', height: 'auto' }}
+                            />
+                            <button 
+                              className="btn btn-accent" 
+                              style={{ padding: '0.4rem', fontSize: '0.75rem', marginTop: '0.25rem' }}
+                              onClick={() => handleRetryDeployment({ skipVercel: true, skipRender: false })}
+                            >
+                              🔄 Retry Render Provisioning
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -730,8 +1197,36 @@ const DeploymentPlan = () => {
                           </div>
                         </>
                       ) : (
-                        <div style={{ color: '#ef4444', fontSize: '0.825rem' }}>
-                          Error: {deployResult.vercel?.error || 'Provisioning failed.'}
+                        <div>
+                          <div style={{ color: '#ef4444', fontSize: '0.825rem', marginBottom: '1rem' }}>
+                            Error: {deployResult.vercel?.error ? (typeof deployResult.vercel.error === 'object' ? (deployResult.vercel.error.message || JSON.stringify(deployResult.vercel.error)) : String(deployResult.vercel.error)) : 'Provisioning failed.'}
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', background: 'rgba(0,0,0,0.2)', padding: '0.75rem', borderRadius: 'var(--radius-md)', border: '1px solid rgba(255,255,255,0.05)' }}>
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600 }}>Interactive Retry:</div>
+                            <input 
+                              type="text" 
+                              className="form-input" 
+                              placeholder="Project Name (e.g. foodloop-frontend-v3)"
+                              value={projectName}
+                              onChange={(e) => setProjectName(e.target.value)}
+                              style={{ fontSize: '0.75rem', padding: '0.35rem 0.5rem', height: 'auto' }}
+                            />
+                            <input 
+                              type="password" 
+                              className="form-input" 
+                              placeholder="Update Vercel Auth Token"
+                              value={vercelToken}
+                              onChange={(e) => setVercelToken(e.target.value)}
+                              style={{ fontSize: '0.75rem', padding: '0.35rem 0.5rem', height: 'auto' }}
+                            />
+                            <button 
+                              className="btn btn-accent" 
+                              style={{ padding: '0.4rem', fontSize: '0.75rem', marginTop: '0.25rem' }}
+                              onClick={() => handleRetryDeployment({ skipVercel: false, skipRender: true })}
+                            >
+                              🔄 Retry Vercel Provisioning
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
