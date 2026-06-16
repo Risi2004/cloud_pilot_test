@@ -2,6 +2,7 @@ import Analysis from '../models/Analysis.js';
 import { fetchRepositoryInfo, generateFallbackReport } from '../services/githubService.js';
 import { aiAnalyze } from '../services/ollamaService.js';
 import { scanLocalDirectory, importDirectoryFiles } from '../services/localScanService.js';
+import { runAnalysisWorkflow } from '../workflows/analysisWorkflow.js';
 
 export const analyzeRepository = async (req, res) => {
   const { githubUrl } = req.body;
@@ -17,8 +18,9 @@ export const analyzeRepository = async (req, res) => {
     // Fetch fresh files
     const repoInfo = await fetchRepositoryInfo(githubUrl);
     
-    // Run AI analysis
-    const aiDetails = await aiAnalyze(repoInfo);
+    // Run the ADK multi-agent analysis workflow
+    const workflowResult = await runAnalysisWorkflow(githubUrl);
+    const { analysis: aiDetails, risks, cost } = workflowResult;
 
     const mergedDetails = {
       framework: aiDetails.framework,
@@ -42,7 +44,7 @@ export const analyzeRepository = async (req, res) => {
       analysis.dockerized = mergedDetails.dockerized;
       analysis.report = finalReport;
       // Reset recommendations/plans for new analysis
-      analysis.recommendation = { frontend: '', backend: '', reason: '', cost: '' };
+      analysis.recommendation = { frontend: '', backend: '', reason: '', cost: cost.totalEstimatedCost || '$0 - $7/month' };
       analysis.deploymentPlan = { steps: [] };
       analysis.createdAt = new Date();
       await analysis.save();
@@ -204,17 +206,19 @@ export const analyzeLocalDirectory = async (req, res) => {
   }
 
   try {
-    const repoInfo = await scanLocalDirectory(localPath);
-    
     // Create standard mock url identifier
     // For safety, convert windows path backslashes to forward slashes, and prepend local://
     const sanitizedPath = localPath.replace(/\\/g, '/');
     const mockUrl = `local://${sanitizedPath}`;
 
+    const repoInfo = await scanLocalDirectory(localPath);
+    
     // Check if there is an existing database record
     let analysis = await Analysis.findOne({ githubUrl: mockUrl });
 
-    const aiDetails = await aiAnalyze(repoInfo);
+    // Run the ADK multi-agent analysis workflow
+    const workflowResult = await runAnalysisWorkflow(mockUrl, localPath);
+    const { analysis: aiDetails, risks, cost } = workflowResult;
 
     const mergedDetails = {
       framework: aiDetails.framework,
@@ -236,7 +240,7 @@ export const analyzeLocalDirectory = async (req, res) => {
       analysis.envVariables = mergedDetails.envVariables;
       analysis.dockerized = mergedDetails.dockerized;
       analysis.report = finalReport;
-      analysis.recommendation = { frontend: '', backend: '', reason: '', cost: '' };
+      analysis.recommendation = { frontend: '', backend: '', reason: '', cost: cost.totalEstimatedCost || '$0 - $7/month' };
       analysis.deploymentPlan = { steps: [] };
       analysis.createdAt = new Date();
       await analysis.save();

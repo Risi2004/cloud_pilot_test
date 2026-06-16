@@ -5,6 +5,7 @@ import { execSync } from 'child_process';
 import Analysis from '../models/Analysis.js';
 import { aiDeploymentPlan, aiFixCode } from '../services/ollamaService.js';
 import { gitAdd, gitCommit, gitPush } from '../services/gitService.js';
+import { runDeploymentWorkflow } from '../workflows/deploymentWorkflow.js';
 
 /**
  * Reads the local git configuration file to retrieve the remote origin URL.
@@ -290,250 +291,27 @@ export const triggerAutoDeployment = async (req, res) => {
     return res.status(400).json({ error: 'githubUrl is required' });
   }
   
-  let { projectName, frontendTier, backendTier, envVars, skipRender, skipVercel, renderUrl, vercelUrl } = config || {};
-  const cleanProjName = (projectName || 'cloudpilot-app').toLowerCase().replace(/[^a-z0-9-]/g, '-');
-
-  // Reset simulation count on fresh deployments
-  if (!skipRender && !skipVercel) {
-    simulationCounts[githubUrl] = 0;
-  }
-
-  const logs = [];
-  const status = {
-    vercel: { success: false, url: null, error: null, id: null },
-    render: { success: false, url: null, error: null, serviceId: null, deployId: null }
-  };
-
   try {
-    const analyses = await Analysis.find({ githubUrl }).sort({ createdAt: -1 }).limit(1);
-    const analysis = analyses[0];
-    const hasBackend = analysis?.recommendation?.backend && analysis.recommendation.backend !== 'None';
-    const hasFrontend = analysis?.recommendation?.frontend && analysis.recommendation.frontend !== 'None';
+    const result = await runDeploymentWorkflow(githubUrl, vercelToken, renderApiKey, config);
+    const cleanProjName = (config?.projectName || 'cloudpilot-app').toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
-    if (!hasBackend) {
-      skipRender = true;
-    }
-    if (!hasFrontend) {
-      skipVercel = true;
-    }
-
-    logs.push('[Agent] Starting automated provisioning workflow...');
-
-    // Automatically sync environment variable changes back to local codebase files (.env) ONLY if it is the local project
-    if (isLocalProject(githubUrl) && envVars && Object.keys(envVars).length > 0) {
-      logs.push('[Agent] Syncing environment variable updates to local codebase .env files...');
-      const updateResult = updateLocalEnvFiles(envVars);
-      if (updateResult && updateResult.success) {
-        logs.push('[Agent] Local .env files updated and synced successfully!');
-      } else {
-        logs.push(`[Agent] [Warning] Local .env sync finished with note: ${updateResult?.error || 'unspecified write error'}`);
+    const status = {
+      vercel: { 
+        success: result.success, 
+        url: result.vercelUrl, 
+        error: null, 
+        id: `mock_deploy_${cleanProjName}` 
+      },
+      render: { 
+        success: result.success, 
+        url: result.renderUrl, 
+        error: null, 
+        serviceId: `mock_render_${cleanProjName}`, 
+        deployId: `mock_render_deploy_${cleanProjName}` 
       }
-    } else if (envVars && Object.keys(envVars).length > 0) {
-      logs.push('[Agent] Bypassing local .env sync (deploying remote/external repository).');
-    }
-    
-    const isMockRender = !renderApiKey || renderApiKey.startsWith('mock') || renderApiKey === 'demo';
-    const isMockVercel = !vercelToken || vercelToken.startsWith('mock') || vercelToken === 'demo';
+    };
 
-    // Render Web Service Provisioning
-    if (skipRender) {
-      if (!hasBackend) {
-        logs.push('[Agent] Render web service provisioning bypassed (frontend-only project, no backend component detected).');
-      } else {
-        logs.push('[Agent] Render web service provisioning skipped (already successful or skipped by user).');
-      }
-      status.render.success = true;
-      status.render.url = renderUrl || null;
-    } else if (isMockRender) {
-      logs.push('[Agent] [Simulation] Authenticating with Render Developer Portal...');
-      logs.push('[Agent] [Simulation] Owner profile verified (Owner ID: owner_mock_12345)');
-      logs.push(`[Agent] [Simulation] Provisioning Render Web Service '${cleanProjName}-backend'...`);
-      logs.push(`[Agent] [Simulation] Configuration: Plan=${backendTier || 'free'}, Runtime=Node.js, RootDir=backend`);
-      
-      if (envVars && Object.keys(envVars).length > 0) {
-        logs.push(`[Agent] [Simulation] Injecting ${Object.keys(envVars).length} environment variables into Render service...`);
-        Object.keys(envVars).forEach(key => {
-          logs.push(`  -> Injected secret: ${key}=********`);
-        });
-      }
-      
-      logs.push('[Agent] [Simulation] Render Web Service created successfully!');
-      status.render.success = true;
-      status.render.url = `https://${cleanProjName}-backend.onrender.com`;
-      status.render.serviceId = `mock_render_service_${cleanProjName}`;
-      status.render.deployId = `mock_render_deploy_${cleanProjName}`;
-      logs.push(`[Agent] [Simulation] Live service URL: https://${cleanProjName}-backend.onrender.com`);
-    } else {
-      logs.push('[Agent] Connecting to Render API...');
-      try {
-        const ownersRes = await axios.get('https://api.render.com/v1/owners', {
-          headers: { Authorization: `Bearer ${renderApiKey}` }
-        });
-        
-        const ownerId = ownersRes.data?.[0]?.owner?.id;
-        if (!ownerId) throw new Error('No owner accounts identified in Render dashboard.');
-        
-        logs.push(`[Agent] Owner profile verified (Owner ID: ${ownerId})`);
-        logs.push(`[Agent] Provisioning Render Web Service '${cleanProjName}-backend'...`);
-        
-        const renderEnvVarsArray = Object.entries(envVars || {}).map(([key, value]) => ({ key, value }));
-        
-        const renderRes = await axios.post('https://api.render.com/v1/services', {
-          type: 'web_service',
-          name: `${cleanProjName}-backend`,
-          ownerId: ownerId,
-          repo: githubUrl,
-          branch: 'main',
-          rootDir: 'backend',
-          plan: backendTier || 'free',
-          envVars: renderEnvVarsArray,
-          serviceDetails: {
-            env: 'node',
-            envSpecificDetails: {
-              buildCommand: 'npm install',
-              startCommand: 'npm start'
-            }
-          }
-        }, {
-          headers: {
-            Authorization: `Bearer ${renderApiKey}`,
-            'Content-Type': 'application/json'
-          }
-        });
-        
-        const serviceUrl = renderRes.data?.url || renderRes.data?.service?.url;
-        const serviceId = renderRes.data?.id || renderRes.data?.service?.id;
-        let deployId = null;
-        try {
-          const deploysRes = await axios.get(`https://api.render.com/v1/services/${serviceId}/deploys?limit=1`, {
-            headers: { Authorization: `Bearer ${renderApiKey}` }
-          });
-          deployId = deploysRes.data?.[0]?.deploy?.id || deploysRes.data?.[0]?.id;
-        } catch (e) {
-          console.warn('[Agent] Could not retrieve Render deploy ID:', e.message);
-        }
-
-        logs.push('[Agent] Render Web Service created successfully!');
-        status.render.success = true;
-        status.render.url = serviceUrl;
-        status.render.serviceId = serviceId;
-        status.render.deployId = deployId;
-        logs.push(`[Agent] Live service URL: ${serviceUrl}`);
-      } catch (err) {
-        const errMsg = extractErrorMessage(err);
-        logs.push(`[Agent] Render Provisioning Failed: ${errMsg}`);
-        status.render.error = errMsg;
-      }
-    }
-
-    // Vercel Frontend Project Provisioning
-    if (skipVercel) {
-      if (!hasFrontend) {
-        logs.push('[Agent] Vercel frontend project provisioning bypassed (backend-only project, no frontend component detected).');
-      } else {
-        logs.push('[Agent] Vercel frontend project provisioning skipped (already successful or skipped by user).');
-      }
-      status.vercel.success = true;
-      status.vercel.url = vercelUrl || null;
-    } else if (isMockVercel) {
-      logs.push('[Agent] [Simulation] Authenticating with Vercel API Gateway...');
-      logs.push(`[Agent] [Simulation] Registering Vercel Project '${cleanProjName}-frontend'...`);
-      logs.push(`[Agent] [Simulation] Setting framework preset: Vite/React SPA`);
-      
-      const backendUrl = status.render.url || `https://${cleanProjName}-backend.onrender.com`;
-      logs.push(`[Agent] [Simulation] Injecting: VITE_API_URL=${backendUrl}`);
-      logs.push('[Agent] [Simulation] Dispatching Vercel build trigger...');
-      logs.push('[Agent] [Simulation] Vercel Frontend Deployment successfully initialized!');
-      
-      status.vercel.success = true;
-      status.vercel.url = `https://${cleanProjName}-frontend.vercel.app`;
-      status.vercel.id = `mock_vercel_deploy_${cleanProjName}`;
-      logs.push(`[Agent] [Simulation] Target preview URL: https://${cleanProjName}-frontend.vercel.app`);
-    } else {
-      logs.push('[Agent] Connecting to Vercel API...');
-      try {
-        let projectData = null;
-        let projectId = null;
-        
-        try {
-          const projectRes = await axios.post('https://api.vercel.com/v9/projects', {
-            name: `${cleanProjName}-frontend`,
-            framework: 'vite',
-            gitRepository: {
-              type: 'github',
-              repo: githubUrl.replace('https://github.com/', '')
-            }
-          }, {
-            headers: { Authorization: `Bearer ${vercelToken}` }
-          });
-          projectData = projectRes.data;
-          projectId = projectData?.id;
-          logs.push(`[Agent] Vercel Project created successfully (ID: ${projectId})`);
-        } catch (postErr) {
-          const errCode = postErr.response?.data?.error?.code;
-          if (postErr.response?.status === 409 || errCode === 'conflict' || errCode === 'project_already_exists') {
-            logs.push('[Agent] Project already exists on Vercel. Retrieving details...');
-            const getRes = await axios.get(`https://api.vercel.com/v9/projects/${cleanProjName}-frontend`, {
-              headers: { Authorization: `Bearer ${vercelToken}` }
-            });
-            projectData = getRes.data;
-            projectId = projectData?.id;
-            logs.push(`[Agent] Vercel Project retrieved successfully (ID: ${projectId})`);
-          } else {
-            throw postErr;
-          }
-        }
-
-        const repoId = projectData?.link?.repoId;
-        if (!repoId) {
-          throw new Error('Project repository linkage does not have a repoId. Make sure your GitHub account is connected to Vercel.');
-        }
-
-        const backendUrl = status.render.url || `https://${cleanProjName}-backend.onrender.com`;
-        logs.push(`[Agent] Setting environment variable VITE_API_URL=${backendUrl} on Vercel...`);
-        
-        try {
-          await axios.post(`https://api.vercel.com/v9/projects/${projectId}/env`, {
-            key: 'VITE_API_URL',
-            value: backendUrl,
-            type: 'plain',
-            target: ['production', 'preview', 'development']
-          }, {
-            headers: { Authorization: `Bearer ${vercelToken}` }
-          });
-        } catch (envErr) {
-          logs.push('[Agent] Note: Environment variable setup verified.');
-        }
-
-        logs.push('[Agent] Triggering deployment build on Vercel...');
-        const deployRes = await axios.post('https://api.vercel.com/v13/deployments', {
-          name: `${cleanProjName}-frontend`,
-          project: `${cleanProjName}-frontend`,
-          gitSource: {
-            type: 'github',
-            ref: 'main',
-            repoId: repoId
-          }
-        }, {
-          headers: { Authorization: `Bearer ${vercelToken}` }
-        });
-        
-        const previewUrl = deployRes.data?.url;
-        const deploymentId = deployRes.data?.id;
-        logs.push('[Agent] Vercel Frontend Deployment successfully initialized!');
-        status.vercel.success = true;
-        status.vercel.url = `https://${previewUrl}`;
-        status.vercel.id = deploymentId;
-        logs.push(`[Agent] Target preview URL: https://${previewUrl}`);
-      } catch (err) {
-        const errMsg = extractErrorMessage(err);
-        logs.push(`[Agent] Vercel Provisioning Failed: ${errMsg}`);
-        status.vercel.error = errMsg;
-      }
-    }
-
-    logs.push('[Agent] Auto-deployment provisioning workflow finished! 🎉');
-    return res.status(200).json({ logs, status });
+    return res.status(200).json({ logs: result.logs, status });
   } catch (error) {
     console.error(`Auto-deployment Error: ${error.message}`);
     return res.status(500).json({ error: `Auto-deployment pipeline failed: ${error.message}` });
