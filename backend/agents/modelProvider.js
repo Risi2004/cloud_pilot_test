@@ -140,7 +140,7 @@ Parameters Schema: ${JSON.stringify(fd.parameters)}`;
       stream: false,
       options: {
         temperature: this.temperature,
-        num_predict: options.maxTokens || 1200
+        num_predict: options.maxTokens || 600
       }
     };
     if (options.jsonFormat || options.format === 'json') {
@@ -157,7 +157,7 @@ Parameters Schema: ${JSON.stringify(fd.parameters)}`;
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: {
         temperature: this.temperature,
-        maxOutputTokens: options.maxTokens || 1200
+        maxOutputTokens: options.maxTokens || 600
       }
     };
     if (systemInstruction) {
@@ -174,7 +174,7 @@ Parameters Schema: ${JSON.stringify(fd.parameters)}`;
     const apiKey = process.env.ANTHROPIC_API_KEY;
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: this.modelName,
-      max_tokens: options.maxTokens || 1200,
+      max_tokens: options.maxTokens || 600,
       temperature: this.temperature,
       system: systemInstruction,
       messages: [{ role: 'user', content: prompt }]

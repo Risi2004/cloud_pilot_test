@@ -4,7 +4,7 @@ import { costAgent } from '../agents/cost/costAgent.js';
 import { runAgentHelper } from '../agents/agentRunner.js';
 import AgentSession from '../models/AgentSession.js';
 
-export const runAnalysisWorkflow = async (githubUrl, localPath = null) => {
+export const runAnalysisWorkflow = async (githubUrl, localPath = null, repoInfo = null) => {
   // Initialize DB Session
   const session = new AgentSession({ githubUrl, workflowStep: 'analyzing' });
   await session.save();
@@ -15,8 +15,22 @@ export const runAnalysisWorkflow = async (githubUrl, localPath = null) => {
 
     // Step A: Parse Repository Structures
     const scanPath = localPath || githubUrl;
-    const repoPrompt = `Scan the directory path: ${scanPath}. Detect framework, database, dependencies, docker status, and envVariables. Return results in JSON.`;
+    let repoPrompt = `Scan the directory path: ${scanPath}. Detect framework, database, dependencies, docker status, and envVariables. Return results in JSON.`;
     
+    if (repoInfo) {
+      repoPrompt += `\n\nHere is the repository metadata and file listing we have fetched for this repository:
+Files in root: ${repoInfo.fileList?.join(', ') || 'none'}
+package.json contents: ${repoInfo.packageJson || 'none'}
+requirements.txt contents: ${repoInfo.requirementsTxt || 'none'}
+vite.config.js contents: ${repoInfo.viteConfig || 'none'}
+next.config.js contents: ${repoInfo.nextConfig || 'none'}
+Dockerfile contents: ${repoInfo.dockerfile || 'none'}
+docker-compose.yml contents: ${repoInfo.dockerCompose || 'none'}
+.env.example contents: ${repoInfo.envExample || 'none'}
+README.md contents: ${repoInfo.readme || 'none'}
+`;
+    }
+
     // We execute the agent's run cycle (generate)
     const repoResultRaw = await runAgentHelper(repositoryAgent, repoPrompt, session._id.toString());
     
@@ -31,15 +45,7 @@ export const runAnalysisWorkflow = async (githubUrl, localPath = null) => {
         throw new Error('Invalid JSON format returned from repository agent');
       }
     } catch (e) {
-      console.warn('[Orchestrator] Repo parsing failed. Falling back to default mock details.');
-      repoDetails = {
-        framework: 'React (Vite/SPA)',
-        database: 'MongoDB',
-        dependencies: ['react', 'react-dom', 'express', 'mongoose'],
-        complexity: 'Medium',
-        envVariables: ['MONGO_URI', 'VITE_API_URL'],
-        dockerized: false
-      };
+      throw new Error(`RepositoryAnalysisError: Repository Agent response could not be parsed as valid JSON. Error: ${e.message}. Raw response: ${repoResultRaw}`);
     }
 
     session.sessionState.framework = repoDetails.framework;
@@ -58,15 +64,17 @@ export const runAnalysisWorkflow = async (githubUrl, localPath = null) => {
     const secPrompt = `Audit these environment keys and dependencies: ${JSON.stringify(repoDetails)}. Check for exposed keys or passwords.`;
     const securityRaw = await runAgentHelper(securityAgent, secPrompt, session._id.toString());
     
-    let securityDetails = { risks: [] };
+    let securityDetails;
     try {
       const jsonStart = securityRaw.indexOf('{');
       const jsonEnd = securityRaw.lastIndexOf('}');
       if (jsonStart !== -1 && jsonEnd !== -1) {
         securityDetails = JSON.parse(securityRaw.substring(jsonStart, jsonEnd + 1));
+      } else {
+        throw new Error('Invalid JSON format returned from security agent');
       }
     } catch (e) {
-      // safe fallback
+      throw new Error(`SecurityScanError: Security Agent response could not be parsed as valid JSON. Error: ${e.message}. Raw response: ${securityRaw}`);
     }
 
     session.sessionState.detectedRisks = securityDetails.risks || [];

@@ -1,6 +1,4 @@
 import Analysis from '../models/Analysis.js';
-import { fetchRepositoryInfo } from '../services/githubService.js';
-import { performRiskAnalysis } from '../services/riskAnalysisService.js';
 
 /**
  * Controller to handle POST /api/risks.
@@ -17,15 +15,19 @@ export const getRisks = async (req, res) => {
     const query = analysisId ? { _id: analysisId } : { githubUrl };
     const analysis = await Analysis.findOne(query);
 
-    if (!analysis) {
-      return res.status(404).json({ error: 'No analysis found for this repository. Analyze it first.' });
+    if (!analysis || !analysis.report) {
+      throw new Error('AnalysisMissingError: No analyzed project report found in the database. Run repository analysis first.');
     }
 
-    // Fetch repository context files
-    const repoInfo = await fetchRepositoryInfo(analysis.githubUrl);
+    // Security risks can be compiled from analysis.report or risks object if populated by workflow
+    const risksList = analysis.report.risks || [];
+    const score = analysis.report.securityScore || 100;
+    const severity = score < 50 ? 'High' : (score < 80 ? 'Medium' : 'Low');
 
-    // Calculate risk profile
-    const risks = performRiskAnalysis(repoInfo, analysis);
+    const risks = {
+      risks: risksList,
+      severity
+    };
 
     // Save calculation to DB
     analysis.risks = risks;
@@ -34,6 +36,6 @@ export const getRisks = async (req, res) => {
     return res.status(200).json(risks);
   } catch (error) {
     console.error(`Risks Controller Error: ${error.message}`);
-    return res.status(500).json({ error: `Risk analysis failed: ${error.message}` });
+    return res.status(500).json({ error: `${error.message}` });
   }
 };

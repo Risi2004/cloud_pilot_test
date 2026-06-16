@@ -13,14 +13,37 @@ export const repositoryAgent = new LlmAgent({
     Your task is to analyze directory listings, configuration manifests, and package dependencies.
     Perform static inspections of directories.
     Extract the main framework (e.g. React, Next.js, Express), primary databases, docker setups, environment structures, and dependency arrays.
-    Return a structured JSON description with keys:
+    Return a structured JSON description matching the following schema:
     {
       "framework": "detected framework",
       "database": "detected database",
       "dependencies": ["dep1", "dep2"],
       "complexity": "Low/Medium/High",
       "envVariables": ["VAR1", "VAR2"],
-      "dockerized": true/false
+      "dockerized": true/false,
+      "report": {
+        "projectName": "Name of the project",
+        "projectType": "Portfolio Website / E-Commerce Platform / AI Application / SaaS Platform / API Service / Dashboard",
+        "architectureType": "Full Stack Application / Frontend Only / Backend Only",
+        "frontendStack": "e.g. React (Vite/SPA), Next.js, Vue, or None",
+        "backendStack": "e.g. Express on Node.js, FastAPI on Python, or None",
+        "databaseStack": "e.g. MongoDB (Managed: MongoDB Atlas), PostgreSQL (Managed: Supabase), or None",
+        "authentication": "JWT / Clerk / NextAuth / Passport / None",
+        "storage": "Cloudflare Storage / Cloudinary / AWS S3 / None",
+        "payments": "Stripe / PayPal / None",
+        "aiServices": "OpenAI / Gemini / Ollama / None",
+        "thirdPartyServices": "Twilio / Nodemailer / None",
+        "containerization": "Dockerfile / Dockerfile & Docker Compose / None",
+        "securityScore": 0-100,
+        "complexityScore": 0-100,
+        "deploymentReadinessScore": 0-100,
+        "hostingRecommendation": "e.g. Frontend: Vercel, Backend: Render, Database: MongoDB Atlas",
+        "estimatedMonthlyCost": "e.g. $0 - $7/month or $7 - $20/month",
+        "scalabilityAnalysis": "Analysis details of scalability and capacity",
+        "deploymentDifficulty": "Low / Medium / High",
+        "requiredEnvironmentVariables": ["VAR1", "VAR2"],
+        "recommendedDeploymentPlan": ["Step 1...", "Step 2..."]
+      }
     }
   `,
   model: modelProvider

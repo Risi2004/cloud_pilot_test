@@ -1,6 +1,4 @@
 import Analysis from '../models/Analysis.js';
-import { fetchRepositoryInfo } from '../services/githubService.js';
-import { calculateReadiness } from '../services/readinessService.js';
 
 /**
  * Controller to handle POST /api/readiness.
@@ -17,15 +15,18 @@ export const getReadiness = async (req, res) => {
     const query = analysisId ? { _id: analysisId } : { githubUrl };
     const analysis = await Analysis.findOne(query);
 
-    if (!analysis) {
-      return res.status(404).json({ error: 'No analysis found for this repository. Analyze it first.' });
+    if (!analysis || !analysis.report) {
+      throw new Error('AnalysisMissingError: No analyzed project report found in the database. Run repository analysis first.');
     }
 
-    // Fetch repository context files
-    const repoInfo = await fetchRepositoryInfo(analysis.githubUrl);
+    const score = analysis.report.deploymentReadinessScore || 50;
+    const readinessLevel = score >= 80 ? 'High' : (score >= 45 ? 'Medium' : 'Low');
 
-    // Calculate readiness profile
-    const readiness = calculateReadiness(repoInfo, analysis);
+    const readiness = {
+      score,
+      readinessLevel,
+      missingItems: []
+    };
 
     // Save calculation to DB
     analysis.readiness = readiness;
@@ -34,6 +35,6 @@ export const getReadiness = async (req, res) => {
     return res.status(200).json(readiness);
   } catch (error) {
     console.error(`Readiness Controller Error: ${error.message}`);
-    return res.status(500).json({ error: `Readiness calculation failed: ${error.message}` });
+    return res.status(500).json({ error: `${error.message}` });
   }
 };

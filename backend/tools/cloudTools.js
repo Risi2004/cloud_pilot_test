@@ -1,6 +1,19 @@
 import { FunctionTool } from '@google/adk';
 import { z } from 'zod';
 import axios from 'axios';
+import fs from 'fs';
+import path from 'path';
+
+const getLocalRepoPath = (githubUrl) => {
+  if (!githubUrl) return process.cwd();
+  if (githubUrl.startsWith('local://') || githubUrl.startsWith('editor://') || githubUrl.includes('CloudPilot')) {
+    return path.dirname(process.cwd());
+  }
+  const tempDir = path.join(process.cwd(), 'temp-clones');
+  const repoName = githubUrl.split('/').pop().replace(/\.git$/, '');
+  return path.join(tempDir, repoName);
+};
+
 
 // Helper to extract clean error string
 const extractErr = (err) => {
@@ -246,22 +259,47 @@ export const monitorDeploymentTool = new FunctionTool({
       render: { status: 'live', error: null, logs: [] }
     };
 
-    // Vercel check
     if (vercelDeploymentId) {
       if (isMockVercel) {
-        // Intentionally mock a build failure on the first round (which doesn't have a healed record)
-        // to showcase the self-healing agent loop
-        const failLogs = [
-          "vite v5.2.11 building for production...",
-          "transforming... [12/98]",
-          "Error: Cannot find module 'react-router-dom' or its corresponding type declarations.",
-          "Error: Vercel build execution failed with exit code 1."
-        ];
-        result.vercel = {
-          status: 'ERROR',
-          error: "Build Failed: Cannot find module 'react-router-dom'",
-          logs: failLogs
-        };
+        let hasReactRouter = false;
+        try {
+          const workspaceRoot = getLocalRepoPath(githubUrl);
+          const pkgPath = path.join(workspaceRoot, 'frontend', 'package.json');
+          if (fs.existsSync(pkgPath)) {
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+            if (pkg.dependencies && pkg.dependencies['react-router-dom']) {
+              hasReactRouter = true;
+            }
+          }
+        } catch (e) {
+          // Ignore read error
+        }
+
+        if (!hasReactRouter) {
+          const failLogs = [
+            "vite v5.2.11 building for production...",
+            "transforming... [12/98]",
+            "Error: Cannot find module 'react-router-dom' or its corresponding type declarations.",
+            "Error: Vercel build execution failed with exit code 1."
+          ];
+          result.vercel = {
+            status: 'ERROR',
+            error: "Build Failed: Cannot find module 'react-router-dom'",
+            logs: failLogs
+          };
+        } else {
+          result.vercel = {
+            status: 'READY',
+            error: null,
+            logs: [
+              "vite v5.2.11 building for production...",
+              "✓ transform code chunks successfully",
+              "✓ render page chunks optimized",
+              "✓ upload build outputs package to Vercel CDN",
+              "✓ Deploy succeeded! Live URL generated."
+            ]
+          };
+        }
       } else {
         try {
           const res = await axios.get(`https://api.vercel.com/v13/deployments/${vercelDeploymentId}`, {

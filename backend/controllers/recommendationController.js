@@ -1,8 +1,4 @@
 import Analysis from '../models/Analysis.js';
-import { fetchRepositoryInfo } from '../services/githubService.js';
-import { calculateReadiness } from '../services/readinessService.js';
-import { performRiskAnalysis } from '../services/riskAnalysisService.js';
-import { generateCloudRecommendation } from '../services/cloudRecommendationService.js';
 
 /**
  * Controller to handle POST /api/recommend.
@@ -19,42 +15,31 @@ export const getRecommendation = async (req, res) => {
     const query = analysisId ? { _id: analysisId } : { githubUrl };
     const analysis = await Analysis.findOne(query);
 
-    if (!analysis) {
-      return res.status(404).json({ error: 'No analysis found for this repository. Analyze it first.' });
+    if (!analysis || !analysis.report) {
+      throw new Error('AnalysisMissingError: No analyzed project report found in the database. Run repository analysis first.');
     }
 
-    // 1. Fetch fresh repo info
-    const repoInfo = await fetchRepositoryInfo(analysis.githubUrl);
-
-    // 2. Perform readiness check
-    const readiness = calculateReadiness(repoInfo, analysis);
-    analysis.readiness = readiness;
-
-    // 3. Perform risk analysis
-    const risks = performRiskAnalysis(repoInfo, analysis);
-    analysis.risks = risks;
-
-    // 4. Generate documentation-aware recommendations
-    const recommendations = await generateCloudRecommendation(analysis, readiness, risks);
-
-    // 5. Save changes to DB
-    analysis.recommendation = {
-      frontend: recommendations.platformRecommendations.frontend,
-      backend: recommendations.platformRecommendations.backend,
-      reason: recommendations.platformRecommendations.reason,
-      cost: recommendations.costEstimate.total
-    };
+    const report = analysis.report;
     
-    // Also save deployment plan steps if returned by AI
-    if (recommendations.deploymentPlan && recommendations.deploymentPlan.length > 0) {
-      analysis.deploymentPlan = { steps: recommendations.deploymentPlan };
-    }
+    // Extract clean frontend and backend platforms from hostingRecommendation
+    const hosting = report.hostingRecommendation || '';
+    const frontend = hosting.includes('Vercel') ? 'Vercel' : (hosting.includes('Render') ? 'Render' : 'None');
+    const backend = hosting.includes('Render') ? 'Render' : (hosting.includes('Vercel') ? 'Vercel' : 'None');
 
+    const recommendation = {
+      frontend,
+      backend,
+      reason: report.scalabilityAnalysis || 'Recommendation based on project framework characteristics.',
+      cost: report.estimatedMonthlyCost || '$0/month'
+    };
+
+    // Save changes to DB
+    analysis.recommendation = recommendation;
     await analysis.save();
 
     return res.status(200).json(analysis.recommendation);
   } catch (error) {
     console.error(`Recommendation Controller Error: ${error.message}`);
-    return res.status(500).json({ error: `Recommendation failed: ${error.message}` });
+    return res.status(500).json({ error: `${error.message}` });
   }
 };

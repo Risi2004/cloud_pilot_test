@@ -7,7 +7,7 @@ const api = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 305000 // 305s timeout to allow Ollama processes to complete
+  timeout: 900000 // 900s (15 min) timeout to allow slow local Ollama processes to complete
 });
 
 export const analyzeRepository = async (githubUrl) => {

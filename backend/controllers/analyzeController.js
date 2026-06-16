@@ -1,6 +1,5 @@
 import Analysis from '../models/Analysis.js';
-import { fetchRepositoryInfo, generateFallbackReport } from '../services/githubService.js';
-import { aiAnalyze } from '../services/ollamaService.js';
+import { fetchRepositoryInfo } from '../services/githubService.js';
 import { scanLocalDirectory, importDirectoryFiles } from '../services/localScanService.js';
 import { runAnalysisWorkflow } from '../workflows/analysisWorkflow.js';
 
@@ -19,8 +18,13 @@ export const analyzeRepository = async (req, res) => {
     const repoInfo = await fetchRepositoryInfo(githubUrl);
     
     // Run the ADK multi-agent analysis workflow
-    const workflowResult = await runAnalysisWorkflow(githubUrl);
+    const workflowResult = await runAnalysisWorkflow(githubUrl, null, repoInfo);
     const { analysis: aiDetails, risks, cost } = workflowResult;
+
+    if (!aiDetails.report || typeof aiDetails.report !== 'object') {
+      throw new Error("RepositoryAnalysisError: The Repository Agent failed to generate the required 20-point analysis report JSON structure.");
+    }
+    const finalReport = aiDetails.report;
 
     const mergedDetails = {
       framework: aiDetails.framework,
@@ -30,9 +34,6 @@ export const analyzeRepository = async (req, res) => {
       envVariables: aiDetails.envVariables,
       dockerized: aiDetails.dockerized
     };
-
-    // Dynamically compile the full 20-point checklist report
-    const finalReport = generateFallbackReport(repoInfo, mergedDetails);
 
     if (analysis) {
       // Update existing record
@@ -155,7 +156,14 @@ export const analyzeEditorCode = async (req, res) => {
       detectedLanguage: combinedPkg ? 'javascript' : (combinedReq ? 'python' : 'unknown')
     };
 
-    const aiDetails = await aiAnalyze(repoInfo);
+    // Run the ADK multi-agent analysis workflow
+    const workflowResult = await runAnalysisWorkflow(mockUrl, null, repoInfo);
+    const { analysis: aiDetails, risks, cost } = workflowResult;
+
+    if (!aiDetails.report || typeof aiDetails.report !== 'object') {
+      throw new Error("RepositoryAnalysisError: The Repository Agent failed to generate the required 20-point analysis report JSON structure.");
+    }
+    const finalReport = aiDetails.report;
 
     const mergedDetails = {
       framework: aiDetails.framework,
@@ -165,8 +173,6 @@ export const analyzeEditorCode = async (req, res) => {
       envVariables: aiDetails.envVariables,
       dockerized: aiDetails.dockerized
     };
-
-    const finalReport = generateFallbackReport(repoInfo, mergedDetails);
 
     const analysis = new Analysis({
       githubUrl: mockUrl,
@@ -217,8 +223,13 @@ export const analyzeLocalDirectory = async (req, res) => {
     let analysis = await Analysis.findOne({ githubUrl: mockUrl });
 
     // Run the ADK multi-agent analysis workflow
-    const workflowResult = await runAnalysisWorkflow(mockUrl, localPath);
+    const workflowResult = await runAnalysisWorkflow(mockUrl, localPath, repoInfo);
     const { analysis: aiDetails, risks, cost } = workflowResult;
+
+    if (!aiDetails.report || typeof aiDetails.report !== 'object') {
+      throw new Error("RepositoryAnalysisError: The Repository Agent failed to generate the required 20-point analysis report JSON structure.");
+    }
+    const finalReport = aiDetails.report;
 
     const mergedDetails = {
       framework: aiDetails.framework,
@@ -228,8 +239,6 @@ export const analyzeLocalDirectory = async (req, res) => {
       envVariables: aiDetails.envVariables,
       dockerized: aiDetails.dockerized
     };
-
-    const finalReport = generateFallbackReport(repoInfo, mergedDetails);
 
     if (analysis) {
       // Update existing record
@@ -291,4 +300,3 @@ export const importLocalDirectory = async (req, res) => {
     return res.status(500).json({ error: `Directory import failed: ${error.message}` });
   }
 };
-

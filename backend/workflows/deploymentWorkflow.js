@@ -16,18 +16,36 @@ export const runDeploymentWorkflow = async (githubUrl, vercelToken, renderApiKey
     await session.save();
 
     // Step A: Provision DB & Services via DeploymentAgent
-    const deployPrompt = `Deploy project '${projectName}' linked to repository '${githubUrl}'. Vercel Token: '${vercelToken}', Render Key: '${renderApiKey}'. Environment variables: ${JSON.stringify(envVars)}`;
+    const deployPrompt = `Deploy project '${projectName}' linked to repository '${githubUrl}'. Vercel Token: '${vercelToken}', Render Key: '${renderApiKey}'. Environment variables: ${JSON.stringify(envVars)}.
+    Call your tools to configure and deploy the services.
+    Output the final deployment details as a valid JSON object matching this schema:
+    {
+      "vercelUrl": "previewUrl from createVercelProject",
+      "renderUrl": "serviceUrl from createRenderService",
+      "vercelDeploymentId": "deploymentId from createVercelProject",
+      "renderServiceId": "serviceId from createRenderService",
+      "renderDeployId": "deployId from createRenderService"
+    }`;
     session.logs.push('[Orchestrator] Dispatched DeploymentAgent to register services...');
     await session.save();
 
     const deployResultRaw = await runAgentHelper(deploymentAgent, deployPrompt, session._id.toString());
     
-    // Simulate setup values if token inputs indicate demo
-    const cleanName = (projectName || 'cloudpilot').toLowerCase().replace(/[^a-z0-9-]/g, '-');
-    const hasBackend = true; // derived
-    
-    session.sessionState.vercelUrl = `https://${cleanName}-frontend.vercel.app`;
-    session.sessionState.renderUrl = `https://${cleanName}-backend.onrender.com`;
+    let deployDetails;
+    try {
+      const jsonStart = deployResultRaw.indexOf('{');
+      const jsonEnd = deployResultRaw.lastIndexOf('}');
+      if (jsonStart !== -1 && jsonEnd !== -1) {
+        deployDetails = JSON.parse(deployResultRaw.substring(jsonStart, jsonEnd + 1));
+      } else {
+        throw new Error("JSON structure not found");
+      }
+    } catch (e) {
+      throw new Error(`DeploymentWorkflowError: Deployment Agent failed to provide valid JSON response. Error: ${e.message}. Raw: ${deployResultRaw}`);
+    }
+
+    session.sessionState.vercelUrl = deployDetails.vercelUrl;
+    session.sessionState.renderUrl = deployDetails.renderUrl;
     session.workflowStep = 'monitoring';
     session.logs.push(`[Orchestrator] Provisioning completed. Frontend target: ${session.sessionState.vercelUrl}, Backend target: ${session.sessionState.renderUrl}`);
     await session.save();
@@ -36,12 +54,28 @@ export const runDeploymentWorkflow = async (githubUrl, vercelToken, renderApiKey
     session.logs.push('[Orchestrator] Dispatched MonitoringAgent to watch the build outputs...');
     await session.save();
 
-    const monitorPrompt = `Poll logs for vercel deployment 'mock_deploy_${cleanName}' and render service 'mock_render_${cleanName}'. Github repo: '${githubUrl}'`;
-    const checkResult = await monitoringAgent.tools[0].execute({
-      vercelDeploymentId: `mock_deploy_${cleanName}`,
-      renderServiceId: `mock_render_${cleanName}`,
-      githubUrl: githubUrl
-    });
+    const monitorPrompt = `Check deployment status for vercel deployment '${deployDetails.vercelDeploymentId}' and render service '${deployDetails.renderServiceId}'. GitHub repo: '${githubUrl}'. 
+    Call monitorDeployment to check the status.
+    Return JSON format:
+    {
+      "vercel": { "status": "READY/ERROR/BUILDING", "error": "detailed message or null", "logs": ["array of logs if error"] },
+      "render": { "status": "live/failed/created/build_in_progress", "error": "detailed message or null", "logs": ["array of logs if failed"] }
+    }`;
+
+    const monitorResultRaw = await runAgentHelper(monitoringAgent, monitorPrompt, session._id.toString());
+    
+    let checkResult;
+    try {
+      const jsonStart = monitorResultRaw.indexOf('{');
+      const jsonEnd = monitorResultRaw.lastIndexOf('}');
+      if (jsonStart !== -1 && jsonEnd !== -1) {
+        checkResult = JSON.parse(monitorResultRaw.substring(jsonStart, jsonEnd + 1));
+      } else {
+        throw new Error("JSON structure not found");
+      }
+    } catch (e) {
+      throw new Error(`DeploymentWorkflowError: Monitoring Agent failed to provide valid JSON response. Error: ${e.message}. Raw: ${monitorResultRaw}`);
+    }
 
     if (checkResult.vercel.status === 'ERROR') {
       session.workflowStep = 'healing';
@@ -53,33 +87,39 @@ export const runDeploymentWorkflow = async (githubUrl, vercelToken, renderApiKey
       session.logs.push('[Orchestrator] Dispatched AutoHealingAgent to heal the broken build...');
       await session.save();
 
-      const healPrompt = `The frontend build failed on Vercel due to missing react-router-dom dependency. Resolve this error. Repo URL: '${githubUrl}'. Error logs: ${checkResult.vercel.error}`;
+      const healPrompt = `The frontend build failed on Vercel with error: '${checkResult.vercel.error}'. 
+      Repository URL: '${githubUrl}'. 
+      Build Logs:
+      ${checkResult.vercel.logs.join('\n')}
+
+      Analyze these logs, find the file that needs changing, then:
+      1. Use the patchFile tool to correct the file.
+      2. Use the gitCommitAndPush tool to commit and push the correction back to main branch.
+      After successful patching and pushing, return a JSON object:
+      {
+        "explanation": "explanation of build failure",
+        "solution": "fix applied",
+        "success": true
+      }`;
+
       const healResultRaw = await runAgentHelper(autoHealingAgent, healPrompt, session._id.toString());
+      
+      let healDetails;
+      try {
+        const jsonStart = healResultRaw.indexOf('{');
+        const jsonEnd = healResultRaw.lastIndexOf('}');
+        if (jsonStart !== -1 && jsonEnd !== -1) {
+          healDetails = JSON.parse(healResultRaw.substring(jsonStart, jsonEnd + 1));
+        } else {
+          throw new Error("JSON structure not found");
+        }
+      } catch (e) {
+        throw new Error(`DeploymentWorkflowError: Auto-healing Agent failed to provide valid JSON response. Error: ${e.message}. Raw: ${healResultRaw}`);
+      }
 
       session.sessionState.healedAttempts = 1;
-      
-      // Execute the tools to patch & push
-      const patchRes = await autoHealingAgent.tools[0].execute({
-        filePath: 'frontend/package.json',
-        newContent: JSON.stringify({
-          name: "frontend",
-          private: true,
-          dependencies: {
-            "react": "^19.2.6",
-            "react-dom": "^19.2.6",
-            "react-router-dom": "^7.17.0"
-          }
-        }, null, 2)
-      });
-
-      const pushRes = await autoHealingAgent.tools[1].execute({
-        repoPath: '.',
-        commitMessage: 'fix(deploy): add missing react-router-dom dependency via AutoHealingAgent',
-        branch: 'main'
-      });
-
       session.workflowStep = 'completed';
-      session.logs.push(`[Orchestrator] Self-healing fix applied successfully: ${healResultRaw}. Git push result: ${pushRes.success}`);
+      session.logs.push(`[Orchestrator] Self-healing fix applied successfully: ${healDetails.explanation}. Solution: ${healDetails.solution}`);
       await session.save();
 
       return {

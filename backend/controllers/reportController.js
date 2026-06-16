@@ -1,9 +1,4 @@
 import Analysis from '../models/Analysis.js';
-import { fetchRepositoryInfo } from '../services/githubService.js';
-import { calculateReadiness } from '../services/readinessService.js';
-import { performRiskAnalysis } from '../services/riskAnalysisService.js';
-import { generateCloudRecommendation } from '../services/cloudRecommendationService.js';
-import { generateArchitectureReport } from '../services/reportGeneratorService.js';
 
 /**
  * Controller to handle POST /api/report.
@@ -20,43 +15,50 @@ export const getReport = async (req, res) => {
     const query = analysisId ? { _id: analysisId } : { githubUrl };
     const analysis = await Analysis.findOne(query);
 
-    if (!analysis) {
-      return res.status(404).json({ error: 'No analysis found for this repository. Analyze it first.' });
+    if (!analysis || !analysis.report) {
+      throw new Error('AnalysisMissingError: No analyzed project report found in the database. Run repository analysis first.');
     }
 
-    // 1. Fetch fresh repo info
-    const repoInfo = await fetchRepositoryInfo(analysis.githubUrl);
+    const report = analysis.report;
 
-    // 2. Perform readiness check
-    const readiness = calculateReadiness(repoInfo, analysis);
-    analysis.readiness = readiness;
-
-    // 3. Perform risk check
-    const risks = performRiskAnalysis(repoInfo, analysis);
-    analysis.risks = risks;
-
-    // 4. Generate Cloud recommendations
-    const recommendation = await generateCloudRecommendation(analysis, readiness, risks);
-    analysis.recommendation = {
-      frontend: recommendation.platformRecommendations.frontend,
-      backend: recommendation.platformRecommendations.backend,
-      reason: recommendation.platformRecommendations.reason,
-      cost: recommendation.costEstimate.total
+    const fullReport = {
+      projectType: report.projectType || 'Full Stack Application',
+      architecture: report.architectureType || 'Full Stack',
+      frontend: report.frontendStack || 'None',
+      backend: report.backendStack || 'None',
+      database: report.databaseStack || 'None',
+      authentication: report.authentication || 'None',
+      storage: report.storage || 'None',
+      complexityScore: report.complexityScore || 50,
+      deploymentReadiness: {
+        score: report.deploymentReadinessScore || 50,
+        readinessLevel: (report.deploymentReadinessScore || 50) >= 80 ? 'High' : ((report.deploymentReadinessScore || 50) >= 45 ? 'Medium' : 'Low'),
+        missingItems: []
+      },
+      hostingRecommendation: {
+        frontend: report.hostingRecommendation?.includes('Vercel') ? 'Vercel' : 'None',
+        backend: report.hostingRecommendation?.includes('Render') ? 'Render' : 'None',
+        reason: report.scalabilityAnalysis || ''
+      },
+      estimatedCost: {
+        frontend: report.estimatedMonthlyCost || '$0/month',
+        backend: '',
+        database: '',
+        total: report.estimatedMonthlyCost || '$0/month'
+      },
+      risks: (report.requiredEnvironmentVariables || []).map(variable => ({
+        metric: 'Environment',
+        details: `Configuration variable required: ${variable}`,
+        severity: 'Low'
+      }))
     };
-    if (recommendation.deploymentPlan && recommendation.deploymentPlan.length > 0) {
-      analysis.deploymentPlan = { steps: recommendation.deploymentPlan };
-    }
 
-    // 5. Generate final Architecture Report
-    const report = generateArchitectureReport(analysis, readiness, risks, recommendation);
-    analysis.architectureReport = report;
-
-    // Save all to database
+    analysis.architectureReport = fullReport;
     await analysis.save();
 
-    return res.status(200).json(report);
+    return res.status(200).json(fullReport);
   } catch (error) {
     console.error(`Report Controller Error: ${error.message}`);
-    return res.status(500).json({ error: `Report generation failed: ${error.message}` });
+    return res.status(500).json({ error: `${error.message}` });
   }
 };

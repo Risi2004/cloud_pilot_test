@@ -3,7 +3,9 @@ import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
 import Analysis from '../models/Analysis.js';
-import { aiDeploymentPlan, aiFixCode } from '../services/ollamaService.js';
+import { runAgentHelper } from '../agents/agentRunner.js';
+import { monitoringAgent } from '../agents/monitoring/monitoringAgent.js';
+import { autoHealingAgent } from '../agents/auto-healing/autoHealingAgent.js';
 import { gitAdd, gitCommit, gitPush } from '../services/gitService.js';
 import { runDeploymentWorkflow } from '../workflows/deploymentWorkflow.js';
 
@@ -251,18 +253,14 @@ export const getDeploymentPlan = async (req, res) => {
     const query = analysisId ? { _id: analysisId } : { githubUrl };
     const analysis = await Analysis.findOne(query);
 
-    if (!analysis) {
-      return res.status(404).json({ error: 'No analysis found for this repository. Analyze it first.' });
+    if (!analysis || !analysis.report) {
+      throw new Error('AnalysisMissingError: No analyzed project report found in the database. Run repository analysis first.');
     }
 
-    // Ensure recommendation exists
-    const recommendation = analysis.recommendation;
-    if (!recommendation || !recommendation.frontend || recommendation.frontend === 'None') {
-      throw new Error('No deployment recommendation found for this repository. Please run get recommendation first.');
+    const steps = analysis.report.recommendedDeploymentPlan || [];
+    if (steps.length === 0) {
+      throw new Error('DeploymentPlanGenerationError: The analyzed project does not contain a model-generated deployment plan.');
     }
-
-    // Generate plan steps
-    const steps = await aiDeploymentPlan(analysis, recommendation);
 
     // Save to DB
     analysis.deploymentPlan = { steps };
@@ -280,7 +278,7 @@ export const getDeploymentPlan = async (req, res) => {
     });
   } catch (error) {
     console.error(`Deployment Plan Controller Error: ${error.message}`);
-    return res.status(500).json({ error: `Deployment plan generation failed: ${error.message}` });
+    return res.status(500).json({ error: `${error.message}` });
   }
 };
 
@@ -319,200 +317,133 @@ export const triggerAutoDeployment = async (req, res) => {
 };
 
 // Global simulation counters to support mock healing in browser simulator
-const simulationCounts = {};
-
 export const getDeploymentStatus = async (req, res) => {
   const { vercelDeploymentId, renderServiceId, renderDeployId, vercelToken, renderApiKey, githubUrl } = req.body;
-  const isMockVercel = !vercelToken || vercelToken.startsWith('mock') || vercelToken === 'demo';
-  const isMockRender = !renderApiKey || renderApiKey.startsWith('mock') || renderApiKey === 'demo';
-
-  const result = {
-    vercel: { status: 'READY', error: null, logs: [] },
-    render: { status: 'live', error: null, logs: [] }
-  };
 
   try {
-    // 1. Check Vercel Status
-    if (vercelDeploymentId) {
-      if (isMockVercel) {
-        const count = simulationCounts[githubUrl] || 0;
-        if (count === 0) {
-          // Intentionally fail the first mock build to trigger auto-fix
-          result.vercel.status = 'ERROR';
-          result.vercel.error = "Build Failed: Cannot find module 'react-router-dom'";
-          result.vercel.logs = [
-            "vite v5.2.11 building for production...",
-            "transforming... [12/98]",
-            "Error: Cannot find module 'react-router-dom' or its corresponding type declarations.",
-            "  at Module._resolveFilename (node:internal/modules/cjs/loader:1140:15)",
-            "  at Module._load (node:internal/modules/cjs/loader:981:27)",
-            "Error: Vercel build execution failed with exit code 1."
-          ];
-        } else {
-          // Success on retry!
-          result.vercel.status = 'READY';
-          result.vercel.logs = [
-            "vite v5.2.11 building for production...",
-            "✓ transform code chunks successfully",
-            "✓ render page chunks optimized",
-            "✓ upload build outputs package to Vercel CDN",
-            "✓ Deploy succeeded! Live URL generated."
-          ];
-        }
-      } else {
-        const vercelRes = await axios.get(`https://api.vercel.com/v13/deployments/${vercelDeploymentId}`, {
-          headers: { Authorization: `Bearer ${vercelToken}` }
-        });
-        const status = vercelRes.data?.status;
-        result.vercel.status = status; // READY, BUILDING, ERROR, etc.
+    const prompt = `Check deployment status for vercel deployment '${vercelDeploymentId || 'none'}' and render service '${renderServiceId || 'none'}' and deploy ID '${renderDeployId || 'none'}'. 
+    Vercel Token: '${vercelToken || ''}', Render API Key: '${renderApiKey || ''}', GitHub URL: '${githubUrl || ''}'.
+    Call monitorDeployment to check the status.
+    Return JSON format:
+    {
+      "vercel": { "status": "READY/ERROR/BUILDING", "error": "detailed message or null", "logs": ["array of logs if error"] },
+      "render": { "status": "live/failed/created/build_in_progress", "error": "detailed message or null", "logs": ["array of logs if failed"] }
+    }`;
 
-        if (status === 'ERROR') {
-          const logsRes = await axios.get(`https://api.vercel.com/v3/deployments/${vercelDeploymentId}/events?limit=40`, {
-            headers: { Authorization: `Bearer ${vercelToken}` }
-          });
-          result.vercel.error = vercelRes.data?.error?.message || "Vercel Build Failed";
-          result.vercel.logs = (logsRes.data || []).map(evt => evt.text || evt.message).filter(Boolean);
-        }
+    const response = await runAgentHelper(monitoringAgent, prompt, `monitor-${Date.now()}`);
+    let parsed;
+    try {
+      const jsonStart = response.indexOf('{');
+      const jsonEnd = response.lastIndexOf('}');
+      if (jsonStart !== -1 && jsonEnd !== -1) {
+        parsed = JSON.parse(response.substring(jsonStart, jsonEnd + 1));
+      } else {
+        throw new Error('No JSON object in response');
       }
+    } catch (e) {
+      throw new Error(`MonitoringStatusError: Failed to parse monitoring status from agent. Error: ${e.message}. Response: ${response}`);
     }
 
-    // 2. Check Render Status
-    if (renderServiceId) {
-      if (isMockRender) {
-        result.render.status = 'live';
-        result.render.logs = [
-          "npm install completed",
-          "npm start called",
-          "Server running in mode on port 10000",
-          "✓ Deploy succeeded! Web service is Live."
-        ];
-      } else {
-        let activeDeployId = renderDeployId;
-        if (!activeDeployId) {
-          try {
-            const deploysRes = await axios.get(`https://api.render.com/v1/services/${renderServiceId}/deploys?limit=1`, {
-              headers: { Authorization: `Bearer ${renderApiKey}` }
-            });
-            activeDeployId = deploysRes.data?.[0]?.deploy?.id || deploysRes.data?.[0]?.id;
-          } catch (e) {}
-        }
-
-        if (activeDeployId) {
-          const deployRes = await axios.get(`https://api.render.com/v1/services/${renderServiceId}/deploys/${activeDeployId}`, {
-            headers: { Authorization: `Bearer ${renderApiKey}` }
-          });
-          const status = deployRes.data?.status;
-          result.render.status = status; // created, build_in_progress, live, build_failed, update_failed
-
-          if (status === 'build_failed' || status === 'update_failed' || status === 'pre_deploy_failed') {
-            result.render.error = `Render Deploy Failed with status: ${status}`;
-            
-            try {
-              const logsRes = await axios.get(`https://api.render.com/v1/services/${renderServiceId}/logs?limit=40`, {
-                headers: { Authorization: `Bearer ${renderApiKey}` }
-              });
-              result.render.logs = (logsRes.data || []).map(l => l.text || l.message || JSON.stringify(l));
-            } catch (logErr) {
-              result.render.logs = ["Build failed. Check Render Dashboard for detailed output logs."];
-            }
-          }
-        }
-      }
-    }
-
-    return res.status(200).json(result);
+    return res.status(200).json(parsed);
   } catch (error) {
     console.error('[DeploymentStatus] Fetch error:', error);
-    return res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: `${error.message}` });
   }
 };
 
 export const autoFixAndRedeploy = async (req, res) => {
   const { githubUrl, errorLogs, provider, vercelToken, renderApiKey, config, dryRun } = req.body;
-  const isMock = !vercelToken || vercelToken.startsWith('mock') || !renderApiKey || renderApiKey.startsWith('mock');
 
   console.log(`[Auto-Fix] Initiating healing loop for ${provider} on ${githubUrl} (dryRun: ${!!dryRun})...`);
 
   try {
+    const workspaceRoot = await getRepositoryPath(githubUrl);
+    const filesContext = {};
+
+    const readSafe = (relPath) => {
+      const fullPath = path.join(workspaceRoot, relPath);
+      if (fs.existsSync(fullPath)) {
+        filesContext[relPath] = fs.readFileSync(fullPath, 'utf8').substring(0, 8000);
+      }
+    };
+
+    readSafe('frontend/package.json');
+    readSafe('backend/package.json');
+    readSafe('package.json');
+
     let explanation = "";
     let solution = "";
     let filesChanged = [];
 
-    if (isMock) {
-      explanation = "Vercel build failed because the 'react-router-dom' dependency is missing in package.json, which prevents Vite compilation.";
-      solution = "Add 'react-router-dom' to frontend package.json and commit changes.";
+    if (dryRun) {
+      const prompt = `We are running in DRY-RUN mode. DO NOT CALL ANY TOOLS (patchFile, gitCommitAndPush).
+Analyze the build error logs:
+${errorLogs}
+
+Here are the file contexts:
+${JSON.stringify(filesContext)}
+
+Explain the issue and provide the solution and the file paths/contents you would change in a valid JSON:
+{
+  "explanation": "why it failed",
+  "solution": "how to fix",
+  "filesToChange": [
+    {
+      "path": "relative file path",
+      "content": "proposed file content"
+    }
+  ]
+}`;
+      const response = await runAgentHelper(autoHealingAgent, prompt, `dryrun-${Date.now()}`);
       
-      const workspaceRoot = await getRepositoryPath(githubUrl);
-      const pkgPath = path.join(workspaceRoot, 'frontend', 'package.json');
-      if (fs.existsSync(pkgPath)) {
-        if (!dryRun) {
-          try {
-            const pkgJson = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-            pkgJson.dependencies = pkgJson.dependencies || {};
-            
-            // Set/ensure dependency is configured
-            pkgJson.dependencies['react-router-dom'] = '^7.17.0';
-            // Inject timestamp metadata to force git change detection
-            pkgJson.cloudpilot_healed_at = new Date().toISOString();
-            
-            fs.writeFileSync(pkgPath, JSON.stringify(pkgJson, null, 2), 'utf8');
-            filesChanged.push('frontend/package.json');
-            
-            try {
-              await gitAdd(workspaceRoot);
-              await gitCommit('fix(deploy): add missing react-router-dom dependency', workspaceRoot);
-              await gitPush('main', workspaceRoot);
-            } catch (gitErr) {
-              console.warn('[Auto-Fix] Git commands skipped or failed in simulation:', gitErr.message);
-            }
-          } catch (pkgErr) {
-            console.error('[Auto-Fix] Failed to edit package.json locally:', pkgErr);
-          }
+      let parsed;
+      try {
+        const jsonStart = response.indexOf('{');
+        const jsonEnd = response.lastIndexOf('}');
+        if (jsonStart !== -1 && jsonEnd !== -1) {
+          parsed = JSON.parse(response.substring(jsonStart, jsonEnd + 1));
         } else {
-          filesChanged.push('frontend/package.json');
+          throw new Error("No JSON object in response");
         }
+      } catch (err) {
+        throw new Error(`SelfHealingError: Failed to parse dry-run solution from agent: ${err.message}. Response: ${response}`);
       }
-      
-      if (!dryRun) {
-        simulationCounts[githubUrl] = (simulationCounts[githubUrl] || 0) + 1;
-      }
+
+      explanation = parsed.explanation;
+      solution = parsed.solution;
+      filesChanged = (parsed.filesToChange || []).map(f => f.path);
     } else {
-      const workspaceRoot = await getRepositoryPath(githubUrl);
-      const filesContext = {};
+      const prompt = `The build failed. Use your tools to read files, fix the files using patchFile tool, and commit/push using gitCommitAndPush tool.
+Error logs:
+${errorLogs}
 
-      const readSafe = (relPath) => {
-        const fullPath = path.join(workspaceRoot, relPath);
-        if (fs.existsSync(fullPath)) {
-          filesContext[relPath] = fs.readFileSync(fullPath, 'utf8').substring(0, 8000);
+Here are the local file contexts for reference:
+${JSON.stringify(filesContext)}
+
+After successful patching and pushing, return a JSON object:
+{
+  "explanation": "explanation of build failure",
+  "solution": "fix applied",
+  "filesChanged": ["array of paths changed"]
+}`;
+      const response = await runAgentHelper(autoHealingAgent, prompt, `liveheal-${Date.now()}`);
+      
+      let parsed;
+      try {
+        const jsonStart = response.indexOf('{');
+        const jsonEnd = response.lastIndexOf('}');
+        if (jsonStart !== -1 && jsonEnd !== -1) {
+          parsed = JSON.parse(response.substring(jsonStart, jsonEnd + 1));
+        } else {
+          throw new Error("No JSON object in response");
         }
-      };
-
-      readSafe('frontend/package.json');
-      readSafe('backend/package.json');
-      readSafe('package.json');
-
-      const aiResult = await aiFixCode(errorLogs, filesContext);
-      explanation = aiResult.explanation || "Build failure resolved by AI configuration correction.";
-      solution = aiResult.solution || "Updated project configuration descriptors.";
-
-      const filesToChange = aiResult.filesToChange || [];
-      for (const file of filesToChange) {
-        if (file.path) {
-          filesChanged.push(file.path);
-          if (!dryRun && file.content) {
-            const targetPath = path.resolve(workspaceRoot, file.path);
-            if (targetPath.startsWith(workspaceRoot)) {
-              fs.writeFileSync(targetPath, file.content, 'utf8');
-            }
-          }
-        }
+      } catch (err) {
+        throw new Error(`SelfHealingError: Failed to parse execution report from agent: ${err.message}. Response: ${response}`);
       }
 
-      if (!dryRun && filesChanged.length > 0) {
-        await gitAdd(workspaceRoot);
-        await gitCommit('fix(deploy): resolve deployment build failure via AI auto-heal', workspaceRoot);
-        await gitPush('main', workspaceRoot);
-      }
+      explanation = parsed.explanation;
+      solution = parsed.solution;
+      filesChanged = parsed.filesChanged || [];
     }
 
     return res.status(200).json({
@@ -523,6 +454,6 @@ export const autoFixAndRedeploy = async (req, res) => {
     });
   } catch (error) {
     console.error('[Auto-Fix] Error:', error);
-    return res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: `${error.message}` });
   }
 };
