@@ -15,10 +15,13 @@ export const runAnalysisWorkflow = async (githubUrl, localPath = null, repoInfo 
 
     // Step A: Parse Repository Structures
     const scanPath = localPath || githubUrl;
-    let repoPrompt = `Scan the directory path: ${scanPath}. Detect framework, database, dependencies, docker status, and envVariables. Return results in JSON.`;
+    let repoPrompt = "";
     
     if (repoInfo) {
-      repoPrompt += `\n\nHere is the repository metadata and file listing we have fetched for this repository:
+      repoPrompt = `Analyze the pre-fetched repository metadata below for '${scanPath}' to detect framework, database, dependencies, docker status, and envVariables. Return results in JSON.
+Do NOT call the analyzeDirectory tool since we are analyzing a remote repository and the metadata is already provided below.
+
+Here is the repository metadata and file listing we have fetched for this repository:
 Files in root: ${repoInfo.fileList?.join(', ') || 'none'}
 package.json contents: ${repoInfo.packageJson || 'none'}
 requirements.txt contents: ${repoInfo.requirementsTxt || 'none'}
@@ -29,6 +32,8 @@ docker-compose.yml contents: ${repoInfo.dockerCompose || 'none'}
 .env.example contents: ${repoInfo.envExample || 'none'}
 README.md contents: ${repoInfo.readme || 'none'}
 `;
+    } else {
+      repoPrompt = `Scan the local directory path: '${scanPath}'. Call the analyzeDirectory tool with this path to inspect the files, then detect framework, database, dependencies, docker status, and envVariables. Return results in JSON.`;
     }
 
     // We execute the agent's run cycle (generate)

@@ -13,6 +13,14 @@ export const repositoryAgent = new LlmAgent({
     Your task is to analyze directory listings, configuration manifests, and package dependencies.
     Perform static inspections of directories.
     Extract the main framework (e.g. React, Next.js, Express), primary databases, docker setups, environment structures, and dependency arrays.
+    
+    CRITICAL INSTRUCTIONS:
+    1. If the user prompt provides pre-fetched repository metadata (such as package.json, fileList, etc.), DO NOT call the analyzeDirectory tool. The metadata is already provided. Simply parse the provided files and return the JSON.
+    2. Only call the analyzeDirectory tool if you are scanning a local filesystem path and no metadata is provided.
+    3. Under any circumstances, you MUST return a valid JSON object matching the schema below.
+    4. Do not write any conversational text, introductions, questions, clarification requests, or explanations.
+    5. Return ONLY the raw JSON object. Do NOT wrap the JSON in markdown code blocks like \`\`\`json ... \`\`\`. Begin and end your response strictly with the JSON curly braces.
+    
     Return a structured JSON description matching the following schema:
     {
       "framework": "detected framework",

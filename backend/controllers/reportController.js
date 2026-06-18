@@ -46,11 +46,18 @@ export const getReport = async (req, res) => {
         database: '',
         total: report.estimatedMonthlyCost || '$0/month'
       },
-      risks: (report.requiredEnvironmentVariables || []).map(variable => ({
-        metric: 'Environment',
-        details: `Configuration variable required: ${variable}`,
-        severity: 'Low'
-      }))
+      risks: [
+        ...(report.risks || []).map(r => ({
+          metric: 'Security',
+          details: `${r.key}: ${r.description}`,
+          severity: r.severity || 'Medium'
+        })),
+        ...(report.requiredEnvironmentVariables || []).map(variable => ({
+          metric: 'Environment',
+          details: `Configuration variable required: ${variable}`,
+          severity: 'Low'
+        }))
+      ]
     };
 
     analysis.architectureReport = fullReport;

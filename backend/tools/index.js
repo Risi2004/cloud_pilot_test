@@ -6,7 +6,6 @@ import {
   createMongoClusterTool, 
   monitorDeploymentTool 
 } from './cloudTools.js';
-import { retrieveKnowledgeTool } from './documentTools.js';
 import { calculateCostsTool } from './costTools.js';
 import { securityScanTool } from './securityTools.js';
 
@@ -18,7 +17,6 @@ export {
   createRenderServiceTool,
   createMongoClusterTool,
   monitorDeploymentTool,
-  retrieveKnowledgeTool,
   calculateCostsTool,
   securityScanTool
 };

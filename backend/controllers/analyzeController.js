@@ -24,7 +24,10 @@ export const analyzeRepository = async (req, res) => {
     if (!aiDetails.report || typeof aiDetails.report !== 'object') {
       throw new Error("RepositoryAnalysisError: The Repository Agent failed to generate the required 20-point analysis report JSON structure.");
     }
-    const finalReport = aiDetails.report;
+    const finalReport = {
+      ...aiDetails.report,
+      risks: risks || []
+    };
 
     const mergedDetails = {
       framework: aiDetails.framework,
@@ -163,7 +166,10 @@ export const analyzeEditorCode = async (req, res) => {
     if (!aiDetails.report || typeof aiDetails.report !== 'object') {
       throw new Error("RepositoryAnalysisError: The Repository Agent failed to generate the required 20-point analysis report JSON structure.");
     }
-    const finalReport = aiDetails.report;
+    const finalReport = {
+      ...aiDetails.report,
+      risks: risks || []
+    };
 
     const mergedDetails = {
       framework: aiDetails.framework,
@@ -229,7 +235,10 @@ export const analyzeLocalDirectory = async (req, res) => {
     if (!aiDetails.report || typeof aiDetails.report !== 'object') {
       throw new Error("RepositoryAnalysisError: The Repository Agent failed to generate the required 20-point analysis report JSON structure.");
     }
-    const finalReport = aiDetails.report;
+    const finalReport = {
+      ...aiDetails.report,
+      risks: risks || []
+    };
 
     const mergedDetails = {
       framework: aiDetails.framework,

@@ -12,7 +12,6 @@ export const orchestratorAgent = new LlmAgent({
     1. Parse the developer's core intent (e.g. analysis, cost estimating, security scanning, deployment, or auto-healing).
     2. Format instructions to route sub-tasks to the specific specialized agent:
        - Code base file structure, package.json parsing, language detection -> RepositoryAgent
-       - Deploy tutorials, best practices, target configuration lookup -> KnowledgeAgent
        - API credentials validation, exposed tokens, security posture -> SecurityAgent
        - Sizing comparisons, budget calculations, resource estimation -> CostAgent
        - Cloud deployments, creating Vercel/Render servers -> DeploymentAgent

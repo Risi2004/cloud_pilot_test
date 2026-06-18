@@ -80,8 +80,10 @@ Parameters Schema: ${JSON.stringify(fd.parameters)}`;
         `Do not write any conversational text before or after the JSON. Just return the JSON object.`;
     }
 
-    // 3. Extract JSON format flag if responseSchema is present
-    const jsonFormat = !!llmRequest.config?.responseSchema;
+    // 3. Extract JSON format flag if responseSchema is present, or if instructions/prompt request JSON
+    const jsonFormat = !!llmRequest.config?.responseSchema || 
+                       (systemInstruction && systemInstruction.toLowerCase().includes('json')) ||
+                       (prompt && prompt.toLowerCase().includes('json'));
 
     console.log(`[ModelProvider] [DEBUG] Sending request to ${this.providerName} (${this.modelName})...`);
     console.log(`[ModelProvider] [DEBUG] Prompt:\n${prompt}`);
@@ -134,20 +136,26 @@ Parameters Schema: ${JSON.stringify(fd.parameters)}`;
 
   async queryOllama(prompt, systemInstruction, options) {
     const url = process.env.OLLAMA_API_URL || 'http://127.0.0.1:11434';
+    const messages = [];
+    if (systemInstruction) {
+      messages.push({ role: 'system', content: systemInstruction });
+    }
+    messages.push({ role: 'user', content: prompt });
+
     const requestData = {
       model: this.modelName,
-      prompt: systemInstruction ? `${systemInstruction}\n\nUser: ${prompt}` : prompt,
+      messages: messages,
       stream: false,
       options: {
         temperature: this.temperature,
-        num_predict: options.maxTokens || 600
+        num_predict: options.maxTokens || 2048
       }
     };
     if (options.jsonFormat || options.format === 'json') {
       requestData.format = 'json';
     }
-    const response = await axios.post(`${url}/api/generate`, requestData);
-    return response.data.response.trim();
+    const response = await axios.post(`${url}/api/chat`, requestData);
+    return response.data.message.content.trim();
   }
 
   async queryGemini(prompt, systemInstruction, options) {
